@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#0f6e5a">
+<title>TRATA CRM</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<!-- Login -->
+<section class="gate" id="gate" hidden>
+  <form class="gate-box" id="loginForm" autocomplete="on">
+    <div class="brand"><div class="logo">T</div>TRATA CRM</div>
+    <h1>Log in</h1>
+    <p>Use the login ID and password your admin gave you.</p>
+    <input id="g-id" class="name" type="text" placeholder="Login ID" autocomplete="username" autocapitalize="none" required>
+    <input id="g-pw" class="name" type="password" placeholder="Password" autocomplete="current-password" required>
+    <label style="display:flex;gap:8px;align-items:center;font-size:13px;color:var(--ink-2)"><input id="remember" type="checkbox" checked> Keep me logged in on this device</label>
+    <div class="err" id="loginErr" role="alert"></div>
+    <button class="btn primary" type="submit" id="loginBtn">Log in</button>
+  </form>
+</section>
+
+<!-- First run: create the admin -->
+<section class="gate" id="setup" hidden>
+  <form class="gate-box" id="setupForm" autocomplete="off">
+    <div class="brand"><div class="logo">T</div>TRATA CRM</div>
+    <h1>Create your admin login</h1>
+    <p>This screen appears only once. Choose the login ID and password you'll use from now on.</p>
+    <input id="s-code" class="name" type="text" placeholder="Setup code (from the install)" autocapitalize="none" required>
+    <input id="s-name" class="name" type="text" placeholder="Your name" maxlength="80" required>
+    <input id="s-id" class="name" type="text" placeholder="Login ID, e.g. aniket" autocapitalize="none" maxlength="30" required>
+    <input id="s-pw" class="name" type="password" placeholder="Password (min 8 characters)" autocomplete="new-password" minlength="8" required>
+    <input id="s-pw2" class="name" type="password" placeholder="Repeat password" autocomplete="new-password" minlength="8" required>
+    <div class="err" id="setupErr" role="alert"></div>
+    <button class="btn primary" type="submit" id="setupBtn">Create admin &amp; log in</button>
+  </form>
+</section>
+
+<div class="loading" id="booting">Loading…</div>
+
+<div id="app" hidden>
+  <header class="top"><div class="top-in">
+    <div class="brand"><div class="logo">T</div>TRATA CRM</div>
+    <nav class="tabs" role="tablist">
+      <button class="tab" role="tab" data-view="dash" aria-selected="true">Dashboard</button>
+      <button class="tab" role="tab" data-view="list" aria-selected="false">Leads</button>
+      <button class="tab" role="tab" data-view="board" aria-selected="false">Pipeline</button>
+      <button class="tab" role="tab" data-view="team" aria-selected="false" id="teamTab" hidden>Team</button>
+    </nav>
+    <div class="spacer"></div>
+    <span class="sync hide-sm" id="sync"></span>
+    <button class="btn ghost" id="refresh" type="button">Refresh</button>
+    <button class="btn primary" id="addBtn" type="button">+ Add lead</button>
+    <div class="usermenu"><button class="btn ghost" type="button" id="userBtn" aria-haspopup="true"></button>
+      <div class="menu" id="userMenu" hidden>
+        <button type="button" id="exportBtn" hidden>Download leads (CSV)</button>
+        <button type="button" id="pwBtn">Change password</button>
+        <button type="button" id="logoutBtn">Log out</button>
+      </div></div>
+  </div></header>
+
+  <main>
+    <section id="v-dash">
+      <div class="kpis" id="kpis"></div>
+      <div class="grid2" style="margin-top:14px">
+        <div class="card"><h2>Do today</h2><div class="todo" id="todo"></div></div>
+        <div class="card"><h2>Pipeline</h2><div class="bars" id="bars"></div>
+          <h2 style="margin-top:18px">What leads want</h2><div class="bars" id="needs"></div></div>
+      </div>
+    </section>
+
+    <section id="v-list" hidden>
+      <div class="filters">
+        <input id="q" type="search" placeholder="Search name, phone, need, notes…" aria-label="Search">
+        <select id="fStatus" aria-label="Status"><option value="">All statuses</option></select>
+        <select id="fPrio" aria-label="Priority"><option value="">All priorities</option><option>Hot</option><option>Warm</option><option>Cold</option></select>
+        <select id="fAssigned" aria-label="Assigned to"><option value="">Anyone</option><option value="none">Unassigned</option></select>
+        <select id="fDue" aria-label="Follow-up"><option value="">Any follow-up</option><option value="due">Due / overdue</option></select>
+        <span class="count" id="count"></span>
+      </div>
+      <div class="table-wrap" style="margin-top:10px">
+        <table><thead><tr>
+          <th>Lead</th><th>Priority</th><th>Status</th><th class="hide-sm">Needs</th><th>Follow-up</th><th class="hide-sm">Assigned</th><th class="hide-sm">Came in</th>
+        </tr></thead><tbody id="rows"></tbody></table>
+      </div>
+    </section>
+
+    <section id="v-board" hidden><div class="board" id="board"></div></section>
+
+    <section id="v-team" hidden>
+      <div class="grid2">
+        <div class="card"><h2>Team members</h2><div id="userList"></div></div>
+        <form class="card" id="userForm"><h2>Add team member</h2>
+          <div class="form">
+            <label class="full">Full name<input id="u-name" required maxlength="80"></label>
+            <label>Login ID<input id="u-id" autocapitalize="none" required placeholder="e.g. prashant" maxlength="30"></label>
+            <label>Role<select id="u-role"><option value="member">Member</option><option value="admin">Admin</option></select></label>
+            <label class="full">Password (min 8 characters)<input id="u-pw" type="text" autocomplete="off" required minlength="8"></label>
+          </div>
+          <div class="err" id="userErr" role="alert"></div>
+          <button class="btn primary" type="submit" id="userSave">Add member</button>
+          <p class="count" style="margin:10px 0 0">Share the login ID and password with them privately. They can change the password after logging in.</p>
+        </form>
+      </div>
+      <div class="card" id="metaCard" style="margin-top:14px">
+        <h2>Real-time leads from Meta (Instagram &amp; Facebook forms)</h2>
+        <div id="metaStatus" class="meta-status">Loading…</div>
+        <div class="meta-grid">
+          <div>
+            <h3 class="mini">In your Meta app → Webhooks → Page</h3>
+            <label class="copyrow">Callback URL<span><code id="m-cb"></code><button class="linkbtn" type="button" data-copy="m-cb">Copy</button></span></label>
+            <label class="copyrow">Verify token<span><code id="m-vt"></code><button class="linkbtn" type="button" data-copy="m-vt">Copy</button></span></label>
+          </div>
+          <form id="metaForm" autocomplete="off">
+            <h3 class="mini">Paste from Meta</h3>
+            <div class="form">
+              <label class="full">App Secret <small id="m-secret-set"></small><input id="m-secret" type="password" autocomplete="off" placeholder="App settings → Basic → App Secret"></label>
+              <label class="full">Page access token <small id="m-token-set"></small><input id="m-token" type="password" autocomplete="off" placeholder="Token with leads_retrieval permission"></label>
+              <label class="full">Page ID (optional)<input id="m-page" inputmode="numeric" autocomplete="off" placeholder="Only if you manage several Pages"></label>
+            </div>
+            <div class="err" id="metaErr" role="alert"></div>
+            <div class="d-actions"><button class="btn primary" type="submit" id="metaSave">Save &amp; connect</button>
+              <button class="btn" type="button" id="metaSync">Fetch last 3 days from Meta</button></div>
+          </form>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" hidden aria-label="Lead details"></aside>
+
+<form class="modal" id="addModal" hidden>
+  <div style="display:flex;align-items:center"><h3>Add lead</h3><button class="x" type="button" data-close aria-label="Close">&times;</button></div>
+  <div class="form">
+    <label class="full">Name<input id="a-name" required maxlength="120"></label>
+    <label>Phone<input id="a-phone" inputmode="tel" maxlength="30"></label>
+    <label>Source<select id="a-source"><option>Walk-in</option><option>Referral</option><option>Phone call</option><option>Website</option><option>Instagram DM</option><option>WhatsApp</option><option>Other</option></select></label>
+    <label>Business type<select id="a-business"></select></label>
+    <label>Needs<select id="a-need"></select></label>
+    <label>Wants to start<select id="a-start"><option value="immediately">Immediately</option><option value="within_1_month">Within 1 month</option><option value="just_exploring">Just exploring</option></select></label>
+    <label>Assigned to<select id="a-assigned"></select></label>
+    <label class="full">Notes<textarea id="a-notes" maxlength="5000"></textarea></label>
+  </div>
+  <div class="err" id="addErr" role="alert"></div>
+  <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="submit" id="addSave">Add lead</button></div>
+</form>
+
+<form class="modal" id="pwModal" hidden>
+  <div style="display:flex;align-items:center"><h3 id="pwTitle">Change password</h3><button class="x" type="button" data-close aria-label="Close">&times;</button></div>
+  <div class="form">
+    <label class="full" id="pwOldWrap">Current password<input id="pw-old" type="password" autocomplete="current-password"></label>
+    <label class="full">New password (min 8 characters)<input id="pw-new" type="password" autocomplete="new-password" required minlength="8"></label>
+  </div>
+  <div class="err" id="pwErr" role="alert"></div>
+  <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="submit" id="pwSave">Save password</button></div>
+</form>
+
+<div class="toast" id="toast" hidden role="status"></div>
+<script src="/app.js"></script>
+</body>
+</html>

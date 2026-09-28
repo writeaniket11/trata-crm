@@ -1,0 +1,23 @@
+{
+  "name": "trata-crm",
+  "version": "1.0.0",
+  "description": "TRATA Digital lead CRM",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "create-admin": "node scripts/create-admin.js",
+    "test": "node --test --test-concurrency=1 test/api.test.js test/meta.test.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^13.0.3",
+    "cookie-parser": "^1.4.7",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.7.0",
+    "helmet": "^8.3.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "private": true
+}
