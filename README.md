@@ -9,7 +9,9 @@ Instagram ad → Meta Instant Form → Google Sheet (already working) → CRM (e
 **What the team can do**
 - **Dashboard:** new leads today, hot leads waiting, follow-ups due, win rate, and a "Do today" list.
 - **Leads:** search and filter by status, priority, person, or due follow-ups.
-- **Pipeline:** a board with a column for each status.
+- **Log a call:** every lead starts as **Fresh**. After each call, tap Connected or Not connected. If connected, choose Interested or Not interested, then Hot, Warm or Cold, set the next follow-up date and write a remark.
+- **Stage track:** each lead shows where it stands (Fresh → Connected / Not connected ×2 → Interested → Hot → Follow-up 3 Oct → Won / Lost) and its last remark.
+- **Pipeline:** a board with a column for each stage: Fresh, Not connected, Interested, Not interested, Won, Lost.
 - **Lead page:** one-tap WhatsApp and Call buttons, plus status, follow-up date, assigned person and notes. There is also a full history of who did what and when.
 - **Team (admins only):** add people, reset passwords, and deactivate people who leave.
 - **Admins** can download all leads as CSV and delete leads.

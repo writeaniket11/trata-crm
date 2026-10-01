@@ -6,7 +6,7 @@ const BUSINESS = ['Shop / Retail', 'Doctor / Clinic / Hospital', 'Restaurant / C
   'Hotel / Travel / Tour agency', 'CA / Lawyer / Consultant', 'Other business'];
 const NEEDS = ['New website', 'Website redesign', 'Mobile app', 'WhatsApp automation / Bulk SMS', 'Branding / Logo', 'SEO / Digital marketing'];
 
-let ME = null, STATUSES = [], TYPES = [], USERS = [], LEADS = [];
+let ME = null, STATUSES = [], TEMPS = ['Hot', 'Warm', 'Cold'], TYPES = [], USERS = [], LEADS = [];
 let view = 'dash', openId = null, resetFor = null, lastVersion = null, lastMax = 0;
 
 const $ = (s) => document.querySelector(s);
@@ -32,9 +32,43 @@ function fmt(iso) { const d = new Date(iso); return isNaN(d) ? '—' : d.toLocal
 function fmtDay(s) { if (!s) return ''; return new Date(s + 'T12:00:00+05:30').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: TZ }); }
 function ago(iso) { const m = (Date.now() - new Date(iso)) / 60000; if (m < 60) return Math.max(1, Math.round(m)) + ' min ago'; const h = m / 60; if (h < 24) return Math.round(h) + ' h ago'; return Math.round(h / 24) + ' d ago'; }
 function wa(p) { let d = String(p || '').replace(/\D/g, ''); if (d.length === 10) d = '91' + d; return d; }
-function isOpen(l) { return l.status !== 'Won' && l.status !== 'Lost'; }
+function isOpen(l) { return l.status !== 'Won' && l.status !== 'Lost' && l.status !== 'Not interested'; }
+function tries(n) { return n > 1 ? ' ×' + n : ''; }
+/** Short "where is this lead" text, e.g. "Not connected ×2" or "Interested · Hot". */
+function stageText(l) {
+  if (l.status === 'Not connected') return 'Not connected' + tries(l.call_attempts);
+  if (l.status === 'Interested') return 'Interested · ' + l.priority + (l.last_call === 'not_connected' ? ' · no answer' + tries(l.call_attempts) : '');
+  return l.status;
+}
+function stagePill(l) { return `<span class="pill ${sCls(l.status)}">${esc(stageText(l))}</span>`; }
+/** The full step-by-step track: Fresh → Call → Interested? → Hot/Warm/Cold → Follow-up → Won/Lost */
+function stageTrack(l) {
+  const st = l.status, called = st !== 'Fresh', ni = st === 'Not interested';
+  const interested = st === 'Interested' || ((st === 'Won' || st === 'Lost') && l.ever_connected);
+  const steps = [];
+  steps.push(['Fresh lead', st === 'Fresh' ? 'k-fresh' : 'done']);
+  if (!called) steps.push(['Call', 'now']);
+  else if (!l.ever_connected) steps.push(['Not connected' + tries(l.call_attempts), 'k-nc']);
+  else steps.push(['Connected', 'k-ok']);
+  if (ni) steps.push(['Not interested', 'k-bad']);
+  else if (interested) steps.push(['Interested', 'k-ok']);
+  else steps.push(['Interested?', '']);
+  if (interested) steps.push([l.priority, 'k-' + l.priority]);
+  else steps.push(['Hot / Warm / Cold', ni ? 'skip' : '']);
+  if (st === 'Interested') {
+    if (l.last_call === 'not_connected') steps.push(['Follow-up · no answer' + tries(l.call_attempts), 'k-nc']);
+    else if (l.follow_up) steps.push(['Follow-up ' + fmtDay(l.follow_up), isDue(l) ? 'k-due' : 'done']);
+    else steps.push(['Set follow-up', 'now']);
+  } else if (st === 'Not connected' && l.follow_up) steps.push(['Call back ' + fmtDay(l.follow_up), isDue(l) ? 'k-due' : 'done']);
+  else steps.push(['Follow-up', ni || st === 'Won' || st === 'Lost' ? 'skip' : '']);
+  if (st === 'Won') steps.push(['Won', 'k-won']);
+  else if (st === 'Lost') steps.push(['Lost', 'k-bad']);
+  else steps.push(['Won / Lost', ni ? 'skip' : '']);
+  return `<div class="track-wrap"><ol class="track" aria-label="Lead stage">${steps.map(([t, c], i) =>
+    `<li class="${c && c !== 'skip' && c !== 'now' ? 'reached' : ''}"><span class="step ${c}"><i>${i + 1}</i>${esc(t)}</span></li>`).join('')}</ol></div>`;
+}
 function isDue(l) { return !!l.follow_up && l.follow_up <= today() && isOpen(l); }
-function sCls(s) { return 's-' + String(s).replace(/\s+/g, '.'); }
+function sCls(s) { return 's-' + String(s).replace(/\s+/g, '-'); }
 function userOptions(sel, withNone) {
   return (withNone ? '<option value="">Unassigned</option>' : '') +
     USERS.map((u) => `<option value="${u.id}" ${String(u.id) === String(sel) ? 'selected' : ''}>${esc(u.name)}</option>`).join('');
@@ -71,11 +105,11 @@ $('#setupForm').addEventListener('submit', async (e) => {
 
 async function start() {
   const meta = await api('GET', '/api/meta');
-  ME = meta.me; STATUSES = meta.statuses; TYPES = meta.activityTypes; USERS = meta.users;
+  ME = meta.me; STATUSES = meta.statuses; TEMPS = meta.temperatures || TEMPS; TYPES = meta.activityTypes; USERS = meta.users;
   $('#gate').hidden = true; $('#setup').hidden = true; $('#booting').hidden = true; $('#app').hidden = false;
   $('#userBtn').textContent = ME.name + ' ▾';
   $('#teamTab').hidden = ME.role !== 'admin'; $('#exportBtn').hidden = ME.role !== 'admin';
-  $('#fStatus').innerHTML = '<option value="">All statuses</option><option value="__open">All open (not Won/Lost)</option><option value="__warm">Interested + Quote sent</option>' + STATUSES.map((s) => `<option>${esc(s)}</option>`).join('');
+  $('#fStatus').innerHTML = '<option value="">All stages</option><option value="__open">All open (still working)</option>' + STATUSES.map((s) => `<option>${esc(s)}</option>`).join('');
   $('#a-business').innerHTML = BUSINESS.map((b) => `<option>${esc(b)}</option>`).join('');
   $('#a-need').innerHTML = NEEDS.map((b) => `<option>${esc(b)}</option>`).join('');
   ['q', 'fStatus', 'fPrio', 'fAssigned', 'fDue'].forEach((id) => ($('#' + id).value = ''));
@@ -104,31 +138,34 @@ function render() {
 
 function renderDash() {
   const L = LEADS, t = today();
-  const newC = L.filter((l) => l.status === 'New').length;
-  const hotNew = L.filter((l) => l.status === 'New' && l.priority === 'Hot').length;
+  const fresh = L.filter((l) => l.status === 'Fresh').length;
+  const nc = L.filter((l) => l.status === 'Not connected').length;
+  const hotInt = L.filter((l) => l.status === 'Interested' && l.priority === 'Hot').length;
   const due = L.filter(isDue).length;
-  const warm = L.filter((l) => l.status === 'Interested' || l.status === 'Quote sent').length;
   const won = L.filter((l) => l.status === 'Won').length;
   const todayC = L.filter((l) => new Date(l.received_at).toLocaleDateString('en-CA', { timeZone: TZ }) === t).length;
   const closed = L.filter((l) => !isOpen(l)).length;
   const conv = closed ? Math.round((won / closed) * 100) : 0;
-  const tiles = [['New today', todayC, '', ''], ['Not contacted', newC, newC ? 'alert' : '', 'New'], ['Hot & waiting', hotNew, hotNew ? 'hot' : '', 'hot'],
-    ['Follow-ups due', due, due ? 'alert' : '', 'due'], ['Interested / Quoted', warm, '', 'warm'], ['Won', won, 'good', 'Won'], ['Win rate (closed)', conv + '%', '', '']];
+  const tiles = [['New today', todayC, '', ''], ['Fresh · not called', fresh, fresh ? 'fresh' : '', 'Fresh'], ['Not connected', nc, nc ? 'nc' : '', 'Not connected'],
+    ['Interested · Hot', hotInt, hotInt ? 'hot' : '', 'hotint'], ['Follow-ups due', due, due ? 'alert' : '', 'due'], ['Won', won, 'good', 'Won'], ['Win rate (closed)', conv + '%', '', '']];
   $('#kpis').innerHTML = tiles.map(([l, v, c, go]) => go
     ? `<button class="kpi ${c}" type="button" data-go="${go}"><b>${v}</b><span>${l}</span></button>`
     : `<div class="kpi ${c}"><b>${v}</b><span>${l}</span></div>`).join('');
 
   const todo = [
-    ...L.filter(isDue).sort((a, b) => a.follow_up.localeCompare(b.follow_up)).map((l) => [l, l.follow_up < t ? 'Overdue follow-up · ' + fmtDay(l.follow_up) : 'Follow-up today']),
-    ...L.filter((l) => l.status === 'New' && l.priority === 'Hot').map((l) => [l, 'Hot lead · not contacted · ' + ago(l.received_at)]),
-    ...L.filter((l) => l.status === 'New' && l.priority !== 'Hot').map((l) => [l, 'New lead · ' + ago(l.received_at)]),
+    ...L.filter(isDue).sort((a, b) => a.follow_up.localeCompare(b.follow_up)).map((l) => {
+      const what = l.status === 'Not connected' ? 'Call back' : 'Follow-up';
+      return [l, l.follow_up < t ? `Overdue ${what.toLowerCase()} · ${fmtDay(l.follow_up)}` : `${what} today`]; }),
+    ...L.filter((l) => l.status === 'Fresh' && l.priority === 'Hot').map((l) => [l, 'Fresh hot lead · not called · ' + ago(l.received_at)]),
+    ...L.filter((l) => l.status === 'Fresh' && l.priority !== 'Hot').map((l) => [l, 'Fresh lead · not called · ' + ago(l.received_at)]),
+    ...L.filter((l) => l.status === 'Not connected' && !l.follow_up).map((l) => [l, 'Not connected' + tries(l.call_attempts) + ' · try again']),
   ];
   const seen = new Set();
   const list = todo.filter(([l]) => !seen.has(l.id) && seen.add(l.id)).slice(0, 12);
   $('#todo').innerHTML = list.length ? list.map(([l, why]) => `<button class="todo-row" type="button" data-id="${l.id}">
       <span class="pill p-${esc(l.priority)}">${esc(l.priority)}</span>
       <span class="todo-main"><strong>${esc(l.name || 'Unnamed')}</strong><small>${esc(why)}${l.assigned_name ? ' · ' + esc(l.assigned_name) : ''}</small></span>
-      <span class="pill ${sCls(l.status)}">${esc(l.status)}</span></button>`).join('')
+      ${stagePill(l)}</button>`).join('')
     : '<div class="empty">All caught up. No follow-ups due and no new leads waiting.</div>';
 
   const max = Math.max(1, ...STATUSES.map((s) => L.filter((l) => l.status === s).length));
@@ -142,10 +179,10 @@ function renderDash() {
 
 function filtered() {
   const q = $('#q').value.toLowerCase(), fs = $('#fStatus').value, fp = $('#fPrio').value, fa = $('#fAssigned').value, fd = $('#fDue').value;
-  const stOk = (l) => !fs || (fs === '__open' ? isOpen(l) : fs === '__warm' ? (l.status === 'Interested' || l.status === 'Quote sent') : l.status === fs);
+  const stOk = (l) => !fs || (fs === '__open' ? isOpen(l) : l.status === fs);
   return LEADS.filter((l) => stOk(l) && (!fp || l.priority === fp) &&
     (!fa || (fa === 'none' ? !l.assigned_to : String(l.assigned_to) === fa)) && (!fd || isDue(l)) &&
-    (!q || [l.name, l.phone, l.need, l.business, l.notes, l.assigned_name].join(' ').toLowerCase().includes(q)));
+    (!q || [l.name, l.phone, l.need, l.business, l.notes, l.last_remark, l.assigned_name].join(' ').toLowerCase().includes(q)));
 }
 function renderList() {
   const L = filtered();
@@ -153,7 +190,7 @@ function renderList() {
   $('#rows').innerHTML = L.length ? L.map((l) => `<tr data-id="${l.id}" tabindex="0">
     <td><strong>${esc(l.name || 'Unnamed')}</strong><span class="sub num">${esc(l.phone)}</span></td>
     <td><span class="pill p-${esc(l.priority)}">${esc(l.priority)}</span></td>
-    <td><span class="pill ${sCls(l.status)}">${esc(l.status)}</span></td>
+    <td>${stagePill(l)}${l.last_remark ? `<span class="sub remark-line">${esc(l.last_remark)}</span>` : ''}</td>
     <td class="hide-sm">${esc(l.need || '—')}<span class="sub">${esc(l.business)}</span></td>
     <td>${l.follow_up ? `<span class="${isDue(l) ? 'due' : ''}">${esc(fmtDay(l.follow_up))}</span>` : '—'}</td>
     <td class="hide-sm">${esc(l.assigned_name || '—')}</td>
@@ -162,10 +199,11 @@ function renderList() {
 }
 function renderBoard() {
   $('#board').innerHTML = STATUSES.map((s) => {
-    const L = LEADS.filter((l) => l.status === s);
+    const rank = { Hot: 0, Warm: 1, Cold: 2 };
+    const L = LEADS.filter((l) => l.status === s).sort((a, b) => s === 'Interested' ? (rank[a.priority] ?? 3) - (rank[b.priority] ?? 3) : 0);
     return `<div class="col"><div class="col-h">${esc(s)} <span>${L.length}</span></div>${L.map((l) => `<button class="lead-card" type="button" data-id="${l.id}">
-      <strong>${esc(l.name || 'Unnamed')}</strong><small>${esc(l.need || l.business || '')}</small>
-      <div class="row"><span class="pill p-${esc(l.priority)}">${esc(l.priority)}</span>${l.follow_up ? `<small class="${isDue(l) ? 'due' : ''}">↻ ${esc(fmtDay(l.follow_up))}</small>` : ''}${l.assigned_name ? `<small>· ${esc(l.assigned_name)}</small>` : ''}</div></button>`).join('')}</div>`;
+      <strong>${esc(l.name || 'Unnamed')}</strong><small>${esc(l.need || l.business || '')}</small>${l.last_remark ? `<small class="remark-line">“${esc(l.last_remark)}”</small>` : ''}
+      <div class="row"><span class="pill p-${esc(l.priority)}">${esc(l.priority)}</span>${l.status === 'Not connected' && l.call_attempts > 1 ? `<small>${l.call_attempts} tries</small>` : ''}${l.follow_up ? `<small class="${isDue(l) ? 'due' : ''}">↻ ${esc(fmtDay(l.follow_up))}</small>` : ''}${l.assigned_name ? `<small>· ${esc(l.assigned_name)}</small>` : ''}</div></button>`).join('')}</div>`;
   }).join('');
 }
 
@@ -177,12 +215,16 @@ async function openLead(id) {
   let d; try { d = await api('GET', '/api/leads/' + id); } catch (e) { dr.innerHTML = `<div class="loading">${esc(e.message)}</div>`; return; }
   if (openId !== id) return;
   const l = d.lead, w = wa(l.phone);
+  const c = { result: '', interest: l.status === 'Interested' ? 'interested' : '', temp: l.priority, follow: '', remark: '' };
   dr.innerHTML = `<div class="d-head"><div><h3>${esc(l.name || 'Unnamed')}</h3>
-      <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap"><span class="pill p-${esc(l.priority)}">${esc(l.priority)}</span><span class="pill ${sCls(l.status)}">${esc(l.status)}</span></div></div>
+      <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap"><span class="pill p-${esc(l.priority)}">${esc(l.priority)}</span>${stagePill(l)}</div></div>
       <button class="x" type="button" id="dClose" aria-label="Close">&times;</button></div>
     <div class="d-body">
       <div class="contact"><span class="num" style="font-size:15px">${esc(l.phone || 'No phone')}</span>
         ${w ? `<a class="btn primary" href="https://wa.me/${w}" target="_blank" rel="noopener">WhatsApp</a><a class="btn" href="tel:+${w}">Call</a>` : ''}</div>
+      ${stageTrack(l)}
+      ${l.last_remark ? `<div class="last-remark"><small>Last remark · ${esc(fmt(l.last_remark_at))}</small><p>${esc(l.last_remark)}</p></div>` : ''}
+      <section class="callbox" aria-labelledby="callTitle"><h2 id="callTitle">${l.status === 'Fresh' ? 'Log first call' : 'Log a call'}</h2><div id="callSteps"></div></section>
       <dl class="facts">
         <dt>Needs</dt><dd>${esc(l.need || '—')}</dd>
         <dt>Business</dt><dd>${esc(l.business || '—')}</dd>
@@ -190,26 +232,72 @@ async function openLead(id) {
         <dt>Came in</dt><dd>${esc(fmt(l.received_at))} (${esc(ago(l.received_at))})</dd>
         <dt>Source</dt><dd>${esc(l.campaign || l.source || '—')}</dd>
       </dl>
+      <details class="more"><summary>Edit details</summary>
       <form class="form" id="dForm">
-        <label>Status<select id="d-status">${STATUSES.map((s) => `<option ${s === l.status ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></label>
         <label>Follow-up date<input id="d-follow" type="date" value="${esc(l.follow_up || '')}"></label>
-        <label class="full">Assigned to<select id="d-assigned">${userOptions(l.assigned_to, true)}</select></label>
-        <label class="full">Notes<textarea id="d-notes" maxlength="5000" placeholder="Budget, requirement, next step…">${esc(l.notes)}</textarea></label>
+        <label>Lead type<select id="d-prio">${TEMPS.map((t) => `<option ${t === l.priority ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
+        <label>Stage (manual fix)<select id="d-status">${STATUSES.map((s) => `<option ${s === l.status ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></label>
+        <label>Assigned to<select id="d-assigned">${userOptions(l.assigned_to, true)}</select></label>
+        <label class="full">Notes<textarea id="d-notes" maxlength="5000" placeholder="Budget, requirement, anything to remember…">${esc(l.notes)}</textarea></label>
         <div class="full d-actions"><button class="btn primary" type="submit" id="dSave">Save changes</button><span class="err" id="dErr" role="alert"></span></div>
-      </form>
-      <div><h2>Activity</h2>
+      </form></details>
+      <div><h2>History</h2>
         <form class="addnote" id="dLogForm">
           <select id="d-type" aria-label="Type">${TYPES.map((t) => `<option>${esc(t)}</option>`).join('')}</select>
-          <input id="d-log" placeholder="e.g. Called, asked for a quote" maxlength="2000" aria-label="Activity details">
+          <input id="d-log" placeholder="Add a note, e.g. sent quote on WhatsApp" maxlength="2000" aria-label="Activity details">
           <button class="btn" type="submit" id="dLog">Add</button></form>
-        <div class="timeline" style="margin-top:12px">${d.activities.length ? d.activities.map((a) => `<div class="t-item"><strong>${esc(a.type)}</strong>${a.details ? ' · ' + esc(a.details) : ''}<small>${esc(a.user_name || 'System')} · ${esc(fmt(a.created_at))}</small></div>`).join('') : '<div class="empty" style="text-align:left;padding:4px 0">No activity yet.</div>'}</div></div>
+        <div class="timeline" style="margin-top:12px">${d.activities.length ? d.activities.map((a) => `<div class="t-item t-${esc(String(a.type).replace(/\s+/g, '-'))}"><strong>${esc(a.type)}</strong>${a.details ? ' · ' + esc(a.details) : ''}<small>${esc(a.user_name || 'System')} · ${esc(fmt(a.created_at))}</small></div>`).join('') : '<div class="empty" style="text-align:left;padding:4px 0">No activity yet.</div>'}</div></div>
       ${ME.role === 'admin' ? '<div><button class="linkbtn danger" type="button" id="dDelete">Delete this lead</button></div>' : ''}
     </div>`;
+
+  // ----- guided "log a call" steps -----
+  const addDays = (n) => { const [y, m, dd] = today().split('-').map(Number); return new Date(Date.UTC(y, m - 1, dd + n)).toISOString().slice(0, 10); };
+  const opt = (field, val, label, cls) => `<button type="button" class="opt ${cls}" data-f="${field}" data-v="${val}" aria-pressed="${c[field] === val}">${label}</button>`;
+  function drawCall() {
+    let h = `<div class="q"><span>1 · Call result</span><div class="seg">${opt('result', 'connected', 'Connected', 'o-ok')}${opt('result', 'not_connected', 'Not connected', 'o-nc')}</div></div>`;
+    if (c.result === 'connected') {
+      h += `<div class="q"><span>2 · Is the lead interested?</span><div class="seg">${opt('interest', 'interested', 'Interested', 'o-ok')}${opt('interest', 'not_interested', 'Not interested', 'o-bad')}</div></div>`;
+      if (c.interest === 'interested') h += `<div class="q"><span>3 · Lead type</span><div class="seg">${TEMPS.map((t) => opt('temp', t, t, 'o-' + t)).join('')}</div></div>`;
+    }
+    const dated = c.result === 'not_connected' || (c.result === 'connected' && c.interest === 'interested');
+    if (dated) h += `<div class="q"><span>${c.result === 'not_connected' ? '2 · Call back on' : '4 · Next follow-up'}</span><div class="datebar">
+        <button type="button" class="chip" data-day="1">Tomorrow</button><button type="button" class="chip" data-day="3">In 3 days</button><button type="button" class="chip" data-day="7">In 1 week</button>
+        <input type="date" id="c-follow" value="${esc(c.follow)}" aria-label="Follow-up date"></div></div>`;
+    if (c.result) h += `<div class="q"><span>Remark</span><textarea id="c-remark" maxlength="2000" placeholder="${c.result === 'not_connected' ? 'Switched off, busy, no answer…' : c.interest === 'not_interested' ? 'Why not interested?' : 'What did they say? Budget, requirement, next step…'}">${esc(c.remark)}</textarea></div>`;
+    const ready = c.result === 'not_connected' || (c.result === 'connected' && (c.interest === 'not_interested' || (c.interest === 'interested' && c.temp)));
+    h += `<div class="d-actions"><button class="btn primary" type="button" id="cSave" ${ready ? '' : 'disabled'}>Save call</button><span class="err" id="cErr" role="alert"></span></div>
+      <div class="closeopts">Deal finished? <button type="button" class="linkbtn won" data-close-as="Won">Mark won</button><button type="button" class="linkbtn danger" data-close-as="Lost">Mark lost</button></div>`;
+    $('#callSteps').innerHTML = h;
+  }
+  drawCall();
+  const box = $('#callSteps');
+  box.addEventListener('click', async (e) => {
+    const o = e.target.closest('.opt');
+    if (o) { c[o.dataset.f] = o.dataset.v; if (o.dataset.f === 'result' && o.dataset.v === 'not_connected' && !c.follow) c.follow = addDays(1); drawCall(); return; }
+    const dbtn = e.target.closest('[data-day]');
+    if (dbtn) { c.follow = addDays(Number(dbtn.dataset.day)); drawCall(); return; }
+    const cl = e.target.closest('[data-close-as]');
+    if (cl) {
+      if (cl.dataset.confirm !== '1') { cl.dataset.confirm = '1'; cl.textContent = `Tap again to mark ${cl.dataset.closeAs.toLowerCase()}`; return; }
+      try { await api('POST', `/api/leads/${id}/close`, { outcome: cl.dataset.closeAs, remark: c.remark }); toast('Marked ' + cl.dataset.closeAs.toLowerCase()); await loadLeads(); openLead(id); }
+      catch (err) { $('#cErr').textContent = err.message; }
+      return;
+    }
+    if (e.target.closest('#cSave')) {
+      const b = $('#cSave'); b.disabled = true; $('#cErr').textContent = '';
+      try {
+        await api('POST', `/api/leads/${id}/call`, { result: c.result, interest: c.interest, temperature: c.temp, follow_up: c.follow || null, remark: c.remark });
+        toast('Call saved'); await loadLeads(); openLead(id);
+      } catch (err) { $('#cErr').textContent = err.message; b.disabled = false; }
+    }
+  });
+  box.addEventListener('input', (e) => { if (e.target.id === 'c-remark') c.remark = e.target.value; if (e.target.id === 'c-follow') c.follow = e.target.value; });
+
   $('#dClose').onclick = closeAll;
   $('#dForm').onsubmit = async (e) => {
     e.preventDefault(); const b = $('#dSave'); b.disabled = true; $('#dErr').textContent = '';
     try {
-      await api('PATCH', '/api/leads/' + id, { status: $('#d-status').value, follow_up: $('#d-follow').value || null,
+      await api('PATCH', '/api/leads/' + id, { status: $('#d-status').value, priority: $('#d-prio').value, follow_up: $('#d-follow').value || null,
         assigned_to: $('#d-assigned').value || null, notes: $('#d-notes').value });
       toast('Saved'); await loadLeads(); openLead(id);
     } catch (err) { $('#dErr').textContent = err.message; b.disabled = false; }
@@ -257,8 +345,8 @@ document.addEventListener('click', (e) => {
   const go = e.target.closest('[data-go]');
   if (go) {
     const g = go.dataset.go; $('#fStatus').value = ''; $('#fPrio').value = ''; $('#fDue').value = ''; $('#q').value = ''; $('#fAssigned').value = '';
-    if (g === 'hot') { $('#fStatus').value = 'New'; $('#fPrio').value = 'Hot'; } else if (g === 'due') $('#fDue').value = 'due';
-    else if (g === 'warm') $('#fStatus').value = '__warm'; else $('#fStatus').value = g;
+    if (g === 'hotint') { $('#fStatus').value = 'Interested'; $('#fPrio').value = 'Hot'; } else if (g === 'due') $('#fDue').value = 'due';
+    else $('#fStatus').value = g;
     renderList(); setView('list'); return;
   }
   const item = e.target.closest('[data-id]');

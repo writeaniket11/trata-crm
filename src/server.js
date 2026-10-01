@@ -11,7 +11,7 @@ const rateLimit = require('express-rate-limit');
 const cookieParser = require('cookie-parser');
 const bcrypt = require('bcryptjs');
 const db = require('./db');
-const { STATUSES, human, priorityFor } = require('./labels');
+const { STATUSES, TEMPERATURES, human, priorityFor } = require('./labels');
 const meta = require('./meta');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -62,8 +62,8 @@ function safeEqual(a, b) {
 
 /** Add one lead from Meta / the Google Sheet. Returns true if it was new. */
 const insLead = db.prepare(`
-  INSERT OR IGNORE INTO leads (external_id, received_at, name, phone, business, need, start, priority, source, campaign)
-  VALUES (?,?,?,?,?,?,?,?,?,?)`);
+  INSERT OR IGNORE INTO leads (external_id, received_at, name, phone, business, need, start, priority, status, source, campaign)
+  VALUES (?,?,?,?,?,?,?,?,'Fresh',?,?)`);
 function insertLead(l) {
   const ext = clean(l.lead_id || l.id, 80);
   if (!ext) return false;
@@ -177,7 +177,7 @@ app.post('/api/auth/password', auth, sameOrigin, (req, res) => {
 // ---------- meta ----------
 app.get('/api/meta', auth, (req, res) => {
   const users = db.prepare('SELECT id, name FROM users WHERE active = 1 ORDER BY name').all();
-  res.json({ statuses: STATUSES, activityTypes: ACTIVITY_TYPES, users, me: req.user });
+  res.json({ statuses: STATUSES, temperatures: TEMPERATURES, activityTypes: ACTIVITY_TYPES, users, me: req.user });
 });
 
 // ---------- leads ----------
@@ -211,7 +211,7 @@ app.post('/api/leads', auth, sameOrigin, (req, res) => {
     INSERT INTO leads (received_at, name, phone, business, need, start, priority, status, assigned_to, notes, source, campaign)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     now(), name, clean(b.phone, 30), clean(b.business, 80), clean(b.need, 80), human(start), priorityFor(start),
-    'New', assigned, clean(b.notes, 5000), clean(b.source, 60) || 'Manual', clean(b.source, 60) || 'Manual');
+    'Fresh', assigned, clean(b.notes, 5000), clean(b.source, 60) || 'Manual', clean(b.source, 60) || 'Manual');
   logActivity(info.lastInsertRowid, req.user.id, 'Created', `Added manually (${clean(b.source, 60) || 'Manual'})`);
   res.status(201).json({ lead: db.prepare(`${leadSelect} WHERE l.id = ?`).get(info.lastInsertRowid) });
 });
@@ -227,6 +227,10 @@ app.patch('/api/leads/:id', auth, sameOrigin, (req, res) => {
   if ('status' in b && b.status !== lead.status) {
     if (!STATUSES.includes(b.status)) return fail(res, 400, 'Unknown status.');
     sets.push('status = ?'); vals.push(b.status); logs.push(['Status', `${lead.status} → ${b.status}`]);
+  }
+  if ('priority' in b && b.priority !== lead.priority) {
+    if (!TEMPERATURES.includes(b.priority)) return fail(res, 400, 'Lead type must be Hot, Warm or Cold.');
+    sets.push('priority = ?'); vals.push(b.priority); logs.push(['Lead type', `${lead.priority} → ${b.priority}`]);
   }
   if ('follow_up' in b && (b.follow_up || null) !== lead.follow_up) {
     const v = b.follow_up ? String(b.follow_up) : null;
@@ -264,6 +268,74 @@ app.patch('/api/leads/:id', auth, sameOrigin, (req, res) => {
   res.json({ lead: db.prepare(`${leadSelect} WHERE l.id = ?`).get(lead.id) });
 });
 
+// ---------- call flow: log one call, or close a lead ----------
+// body: { result: 'connected'|'not_connected', interest: 'interested'|'not_interested',
+//         temperature: 'Hot'|'Warm'|'Cold', follow_up: 'YYYY-MM-DD'|null, remark }
+app.post('/api/leads/:id/call', auth, sameOrigin, (req, res) => {
+  const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
+  if (!lead) return fail(res, 404, 'Lead not found.');
+  const b = req.body || {};
+  const remark = clean(b.remark, 2000);
+  const follow = b.follow_up ? String(b.follow_up) : null;
+  if (follow && !isDate(follow)) return fail(res, 400, 'Follow-up date is not valid.');
+  const t = now();
+  const up = { last_call_at: t, updated_at: t };
+  const parts = [];
+
+  if (b.result === 'not_connected') {
+    up.last_call = 'not_connected';
+    up.call_attempts = lead.call_attempts + 1;
+    // A missed call never undoes an earlier "Interested" – it only counts the attempt.
+    if (lead.status === 'Fresh' || lead.status === 'Not connected') up.status = 'Not connected';
+    if (follow) up.follow_up = follow;
+    parts.push(`Not connected${up.call_attempts > 1 ? ` (try ${up.call_attempts})` : ''}`);
+    if (follow) parts.push(`Call back ${follow}`);
+  } else if (b.result === 'connected') {
+    if (!['interested', 'not_interested'].includes(b.interest)) return fail(res, 400, 'Choose Interested or Not interested.');
+    up.last_call = 'connected';
+    up.call_attempts = 0;
+    up.ever_connected = 1;
+    parts.push('Connected');
+    if (b.interest === 'interested') {
+      if (!TEMPERATURES.includes(b.temperature)) return fail(res, 400, 'Choose Hot, Warm or Cold.');
+      up.status = 'Interested';
+      up.priority = b.temperature;
+      up.follow_up = follow;
+      parts.push('Interested', b.temperature);
+      if (follow) parts.push(`Follow-up ${follow}`);
+    } else {
+      up.status = 'Not interested';
+      up.follow_up = null;
+      parts.push('Not interested');
+    }
+  } else {
+    return fail(res, 400, 'Choose Connected or Not connected.');
+  }
+  if (remark) { up.last_remark = remark; up.last_remark_at = t; }
+
+  const keys = Object.keys(up);
+  db.transaction(() => {
+    db.prepare(`UPDATE leads SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...keys.map((k) => up[k]), lead.id);
+    logActivity(lead.id, req.user.id, 'Call', parts.join(' · ') + (remark ? ` — ${remark}` : ''));
+  })();
+  res.json({ lead: db.prepare(`${leadSelect} WHERE l.id = ?`).get(lead.id) });
+});
+
+app.post('/api/leads/:id/close', auth, sameOrigin, (req, res) => {
+  const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
+  if (!lead) return fail(res, 404, 'Lead not found.');
+  const outcome = req.body && req.body.outcome;
+  if (!['Won', 'Lost'].includes(outcome)) return fail(res, 400, 'Choose Won or Lost.');
+  const remark = clean(req.body.remark, 2000);
+  const t = now();
+  db.transaction(() => {
+    db.prepare(`UPDATE leads SET status = ?, follow_up = NULL, updated_at = ?${remark ? ', last_remark = ?, last_remark_at = ?' : ''} WHERE id = ?`)
+      .run(...(remark ? [outcome, t, remark, t, lead.id] : [outcome, t, lead.id]));
+    logActivity(lead.id, req.user.id, outcome, remark || `Marked ${outcome.toLowerCase()}`);
+  })();
+  res.json({ lead: db.prepare(`${leadSelect} WHERE l.id = ?`).get(lead.id) });
+});
+
 app.delete('/api/leads/:id', auth, adminOnly, sameOrigin, (req, res) => {
   const r = db.prepare('DELETE FROM leads WHERE id = ?').run(req.params.id);
   if (!r.changes) return fail(res, 404, 'Lead not found.');
@@ -285,7 +357,7 @@ app.post('/api/leads/:id/activities', auth, sameOrigin, (req, res) => {
 app.get('/api/export.csv', auth, adminOnly, (req, res) => {
   const rows = db.prepare(`${leadSelect} ORDER BY l.received_at DESC`).all();
   const cols = ['id', 'received_at', 'name', 'phone', 'business', 'need', 'start', 'priority', 'status',
-    'follow_up', 'assigned_name', 'notes', 'source', 'campaign', 'external_id'];
+    'follow_up', 'call_attempts', 'last_remark', 'last_remark_at', 'assigned_name', 'notes', 'source', 'campaign', 'external_id'];
   const esc = (v) => {
     let s = v === null || v === undefined ? '' : String(v);
     if (/^[=+\-@]/.test(s)) s = "'" + s; // stop spreadsheet formula injection

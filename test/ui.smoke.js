@@ -66,15 +66,22 @@ const errors = [];
     await shot('03-leads');
     step(`leads list: ${total} rows, search works`);
 
-    // Open lead, update status/follow-up/assignee/notes
+    // Open lead, log a call, then edit follow-up/assignee/notes
     await page.click('#rows tr[data-id] >> text=Asha');
-    await page.waitForSelector('#dForm');
-    await page.selectOption('#d-status', 'Contacted');
+    await page.waitForSelector('#callSteps .opt');
+    await page.click('#callSteps .opt[data-v="connected"]');
+    await page.click('#callSteps .opt[data-v="interested"]');
+    await page.click('#callSteps .opt[data-v="Warm"]');
+    await page.click('#callSteps [data-day="3"]');
+    await page.fill('#c-remark', 'Wants 5-page site. Send quote.');
+    await page.click('#cSave');
+    await page.waitForFunction(() => document.querySelector('#drawer .timeline') && document.querySelector('#drawer .timeline').textContent.includes('Interested · Warm'));
+    await page.click('#drawer details.more summary');
     await page.fill('#d-follow', '2026-09-27');
     await page.selectOption('#d-assigned', { label: 'Aniket' });
-    await page.fill('#d-notes', 'Called. Wants 5-page site. Send quote.');
+    await page.fill('#d-notes', 'Prefers WhatsApp.');
     await page.click('#dSave');
-    await page.waitForFunction(() => document.querySelector('#drawer .timeline') && document.querySelector('#drawer .timeline').textContent.includes('Contacted'));
+    await page.waitForFunction(() => document.querySelector('#drawer .timeline').textContent.includes('Assigned'));
     await page.fill('#d-log', 'Sent WhatsApp with portfolio');
     await page.selectOption('#d-type', 'WhatsApp');
     await page.click('#dLog');
@@ -82,16 +89,16 @@ const errors = [];
     const wa = await page.getAttribute('#drawer a.btn.primary', 'href');
     assert.equal(wa, 'https://wa.me/919800000001');
     await shot('04-lead-drawer');
-    step('lead drawer: saved status/follow-up/assignee/notes, logged activity, WhatsApp link ok');
+    step('lead drawer: logged a call (connected, interested, warm), saved follow-up/assignee/notes, WhatsApp link ok');
     await page.click('#dClose');
 
     // Pipeline board
     await page.click('.tab[data-view="board"]');
     await page.waitForSelector('#board .col');
-    const contactedCol = page.locator('#board .col', { hasText: 'Contacted' }).first();
-    assert.ok((await contactedCol.textContent()).includes('Asha'));
+    const interestedCol = page.locator('#board .col', { hasText: 'Interested' }).first();
+    assert.ok((await interestedCol.textContent()).includes('Asha'));
     await shot('05-pipeline');
-    step('pipeline shows lead under Contacted');
+    step('pipeline shows lead under Interested');
 
     // Add lead
     await page.click('#addBtn');

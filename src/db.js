@@ -77,6 +77,33 @@ CREATE TABLE IF NOT EXISTS meta_events (
 );
 `);
 
+// ---------- v2: call-by-call stage flow ----------
+// New columns for the "log a call" flow. Added in place so existing data is kept.
+const leadCols = new Set(db.prepare('PRAGMA table_info(leads)').all().map((c) => c.name));
+const addCol = (name, def) => { if (!leadCols.has(name)) db.exec(`ALTER TABLE leads ADD COLUMN ${name} ${def}`); };
+addCol('call_attempts', 'INTEGER NOT NULL DEFAULT 0');   // calls in a row that did not connect
+addCol('last_call', "TEXT NOT NULL DEFAULT ''");         // 'connected' | 'not_connected' | ''
+addCol('last_call_at', 'TEXT');
+addCol('ever_connected', 'INTEGER NOT NULL DEFAULT 0');
+addCol('last_remark', "TEXT NOT NULL DEFAULT ''");
+addCol('last_remark_at', 'TEXT');
+
+// One-time move of the old statuses into the new stages.
+if (!db.prepare("SELECT 1 FROM settings WHERE key = 'stage_flow_v2'").get()) {
+  db.transaction(() => {
+    db.exec(`
+      UPDATE leads SET status = 'Fresh' WHERE status = 'New';
+      UPDATE leads SET status = 'Interested', ever_connected = 1, last_call = 'connected'
+        WHERE status IN ('Contacted', 'Follow-up', 'Quote sent', 'Interested');
+      UPDATE leads SET ever_connected = 1, last_call = 'connected' WHERE status IN ('Won', 'Lost');
+      UPDATE leads SET last_remark = notes, last_remark_at = updated_at WHERE notes != '' AND last_remark = '';
+    `);
+    db.prepare("INSERT INTO settings (key, value) VALUES ('stage_flow_v2', ?)").run(new Date().toISOString());
+  })();
+}
+// Leads written with the old default (e.g. by an older import) are always Fresh.
+db.exec("UPDATE leads SET status = 'Fresh' WHERE status = 'New'");
+
 const getSetting = (k) => { const r = db.prepare('SELECT value FROM settings WHERE key = ?').get(k); return r ? r.value : ''; };
 const setSetting = (k, v) => db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(k, String(v ?? ''));
 

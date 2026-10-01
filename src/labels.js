@@ -1,6 +1,8 @@
 'use strict';
 
-const STATUSES = ['New', 'Contacted', 'Follow-up', 'Interested', 'Quote sent', 'Won', 'Lost'];
+// Stages a lead moves through. Fresh → (call) Not connected / Interested / Not interested → Won / Lost.
+const STATUSES = ['Fresh', 'Not connected', 'Interested', 'Not interested', 'Won', 'Lost'];
+const TEMPERATURES = ['Hot', 'Warm', 'Cold'];
 
 const MAP = {
   new_website: 'New website',
@@ -33,4 +35,4 @@ function priorityFor(start) {
   return 'Cold';
 }
 
-module.exports = { STATUSES, human, priorityFor };
+module.exports = { STATUSES, TEMPERATURES, human, priorityFor };
