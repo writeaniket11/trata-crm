@@ -69,9 +69,10 @@ const errors = [];
     // Open lead, log a call, then edit follow-up/assignee/notes
     await page.click('#rows tr[data-id] >> text=Asha');
     await page.waitForSelector('#callSteps .opt');
-    await page.click('#callSteps .opt[data-v="connected"]');
     await page.click('#callSteps .opt[data-v="interested"]');
     await page.click('#callSteps .opt[data-v="Warm"]');
+    await page.click('#callSteps .opt[data-v="₹15k–50k"]');
+    await page.click('#callSteps .opt[data-v="callback"]');
     await page.click('#callSteps [data-day="3"]');
     await page.fill('#c-remark', 'Wants 5-page site. Send quote.');
     await page.click('#cSave');
@@ -86,19 +87,20 @@ const errors = [];
     await page.selectOption('#d-type', 'WhatsApp');
     await page.click('#dLog');
     await page.waitForFunction(() => document.querySelector('#drawer .timeline').textContent.includes('Sent WhatsApp with portfolio'));
-    const wa = await page.getAttribute('#drawer a.btn.primary', 'href');
-    assert.equal(wa, 'https://wa.me/919800000001');
+    const tel = await page.getAttribute('#drawer .contact a.btn.primary', 'href');
+    assert.equal(tel, 'tel:+919800000001');
+    assert.equal(await page.getAttribute('#drawer .contact a.btn:not(.primary)', 'href'), 'https://wa.me/919800000001');
     await shot('04-lead-drawer');
-    step('lead drawer: logged a call (connected, interested, warm), saved follow-up/assignee/notes, WhatsApp link ok');
+    step('lead drawer: logged a call (interested, warm, call back), saved follow-up/assignee/notes, Call + WhatsApp links ok');
     await page.click('#dClose');
 
     // Pipeline board
     await page.click('.tab[data-view="board"]');
     await page.waitForSelector('#board .col');
-    const interestedCol = page.locator('#board .col', { hasText: 'Interested' }).first();
-    assert.ok((await interestedCol.textContent()).includes('Asha'));
+    const qualifyingCol = page.locator('#board .col', { hasText: 'Qualifying' }).first();
+    assert.ok((await qualifyingCol.textContent()).includes('Asha'));
     await shot('05-pipeline');
-    step('pipeline shows lead under Interested');
+    step('pipeline shows lead under Qualifying');
 
     // Add lead
     await page.click('#addBtn');

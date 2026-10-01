@@ -11,7 +11,9 @@ const rateLimit = require('express-rate-limit');
 const cookieParser = require('cookie-parser');
 const bcrypt = require('bcryptjs');
 const db = require('./db');
-const { STATUSES, TEMPERATURES, human, priorityFor } = require('./labels');
+const { STATUSES, OPEN_STAGES, TEMPERATURES, LOST_REASONS, BUDGETS, MAX_TRIES, MAX_CUTS, FINAL_TRY_DAYS,
+  human, priorityFor } = require('./labels');
+const { applyCall, rupees, inr } = require('./callflow');
 const meta = require('./meta');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -47,6 +49,10 @@ const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 function fail(res, code, message) { return res.status(code).json({ error: message }); }
 function clean(v, max = 500) { return String(v === undefined || v === null ? '' : v).trim().slice(0, max); }
 function isDate(v) { return /^\d{4}-\d{2}-\d{2}$/.test(v); }
+function isTime(v) { return /^([01]\d|2[0-3]):[0-5]\d$/.test(v); }
+// Dates for follow-ups are calendar days in India.
+function istToday() { return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }); }
+function istHour() { return Number(new Date().toLocaleString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', hour12: false })); }
 function validUsername(u) { return /^[a-z0-9._-]{3,30}$/i.test(u); }
 function validPassword(p) { return typeof p === 'string' && p.length >= 8 && p.length <= 200; }
 
@@ -62,8 +68,8 @@ function safeEqual(a, b) {
 
 /** Add one lead from Meta / the Google Sheet. Returns true if it was new. */
 const insLead = db.prepare(`
-  INSERT OR IGNORE INTO leads (external_id, received_at, name, phone, business, need, start, priority, status, source, campaign)
-  VALUES (?,?,?,?,?,?,?,?,'Fresh',?,?)`);
+  INSERT OR IGNORE INTO leads (external_id, received_at, name, phone, business, need, start, priority, status, source, campaign, stage_at)
+  VALUES (?,?,?,?,?,?,?,?,'New',?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`);
 function insertLead(l) {
   const ext = clean(l.lead_id || l.id, 80);
   if (!ext) return false;
@@ -177,7 +183,8 @@ app.post('/api/auth/password', auth, sameOrigin, (req, res) => {
 // ---------- meta ----------
 app.get('/api/meta', auth, (req, res) => {
   const users = db.prepare('SELECT id, name FROM users WHERE active = 1 ORDER BY name').all();
-  res.json({ statuses: STATUSES, temperatures: TEMPERATURES, activityTypes: ACTIVITY_TYPES, users, me: req.user });
+  res.json({ statuses: STATUSES, openStages: OPEN_STAGES, temperatures: TEMPERATURES, lostReasons: LOST_REASONS, budgets: BUDGETS,
+    rules: { maxTries: MAX_TRIES, maxCuts: MAX_CUTS, finalTryDays: FINAL_TRY_DAYS }, activityTypes: ACTIVITY_TYPES, users, me: req.user });
 });
 
 // ---------- leads ----------
@@ -208,10 +215,10 @@ app.post('/api/leads', auth, sameOrigin, (req, res) => {
   const assigned = b.assigned_to ? Number(b.assigned_to) : null;
   if (assigned && !db.prepare('SELECT 1 FROM users WHERE id = ?').get(assigned)) return fail(res, 400, 'Unknown team member.');
   const info = db.prepare(`
-    INSERT INTO leads (received_at, name, phone, business, need, start, priority, status, assigned_to, notes, source, campaign)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    INSERT INTO leads (received_at, name, phone, business, need, start, priority, status, assigned_to, notes, source, campaign, stage_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     now(), name, clean(b.phone, 30), clean(b.business, 80), clean(b.need, 80), human(start), priorityFor(start),
-    'Fresh', assigned, clean(b.notes, 5000), clean(b.source, 60) || 'Manual', clean(b.source, 60) || 'Manual');
+    'New', assigned, clean(b.notes, 5000), clean(b.source, 60) || 'Manual', clean(b.source, 60) || 'Manual', now());
   logActivity(info.lastInsertRowid, req.user.id, 'Created', `Added manually (${clean(b.source, 60) || 'Manual'})`);
   res.status(201).json({ lead: db.prepare(`${leadSelect} WHERE l.id = ?`).get(info.lastInsertRowid) });
 });
@@ -224,15 +231,43 @@ app.patch('/api/leads/:id', auth, sameOrigin, (req, res) => {
   const vals = [];
   const logs = [];
 
+  const reason = 'lost_reason' in b ? clean(b.lost_reason, 60) : lead.lost_reason;
+  if (reason && !LOST_REASONS.includes(reason)) return fail(res, 400, 'Unknown lost reason.');
   if ('status' in b && b.status !== lead.status) {
     if (!STATUSES.includes(b.status)) return fail(res, 400, 'Unknown status.');
-    sets.push('status = ?'); vals.push(b.status); logs.push(['Status', `${lead.status} → ${b.status}`]);
+    if (b.status === 'Lost' && !reason) return fail(res, 400, 'Choose why the lead was lost.');
+    sets.push('status = ?', 'stage_at = ?'); vals.push(b.status, now()); logs.push(['Status', `${lead.status} → ${b.status}`]);
+    if (b.status !== 'Lost' && lead.lost_reason) { sets.push("lost_reason = ''"); }
+    if (b.status === 'Won' || b.status === 'Lost') sets.push('follow_up = NULL');
+  }
+  if ((b.status || lead.status) === 'Lost' && reason !== lead.lost_reason) {
+    sets.push('lost_reason = ?'); vals.push(reason); logs.push(['Lost reason', reason]);
+  }
+  if ('deal_value' in b) {
+    const v = b.deal_value === '' || b.deal_value === null ? null : rupees(b.deal_value);
+    if (b.deal_value !== '' && b.deal_value !== null && v === null) return fail(res, 400, 'Deal value should be an amount in ₹.');
+    if (v !== lead.deal_value) { sets.push('deal_value = ?'); vals.push(v); logs.push(['Deal value', v ? `₹${v.toLocaleString('en-IN')}` : 'cleared']); }
+  }
+  if ('budget' in b && clean(b.budget, 30) !== lead.budget) {
+    const v = clean(b.budget, 30);
+    if (v && !BUDGETS.includes(v)) return fail(res, 400, 'Unknown budget.');
+    sets.push('budget = ?'); vals.push(v); logs.push(['Budget', v || 'cleared']);
+  }
+  if ('decision_maker' in b && clean(b.decision_maker, 3) !== lead.decision_maker) {
+    const v = clean(b.decision_maker, 3);
+    if (v && !['yes', 'no'].includes(v)) return fail(res, 400, 'Decision maker should be yes or no.');
+    sets.push('decision_maker = ?'); vals.push(v); logs.push(['Decision maker', v || 'cleared']);
+  }
+  if ('follow_time' in b && clean(b.follow_time, 5) !== lead.follow_time) {
+    const v = clean(b.follow_time, 5);
+    if (v && !isTime(v)) return fail(res, 400, 'Time is not valid.');
+    sets.push('follow_time = ?'); vals.push(v);
   }
   if ('priority' in b && b.priority !== lead.priority) {
     if (!TEMPERATURES.includes(b.priority)) return fail(res, 400, 'Lead type must be Hot, Warm or Cold.');
     sets.push('priority = ?'); vals.push(b.priority); logs.push(['Lead type', `${lead.priority} → ${b.priority}`]);
   }
-  if ('follow_up' in b && (b.follow_up || null) !== lead.follow_up) {
+  if ('follow_up' in b && (b.follow_up || null) !== lead.follow_up && !['Won', 'Lost'].includes(b.status || lead.status)) {
     const v = b.follow_up ? String(b.follow_up) : null;
     if (v && !isDate(v)) return fail(res, 400, 'Follow-up date is not valid.');
     sets.push('follow_up = ?'); vals.push(v); logs.push(['Follow-up', v || 'cleared']);
@@ -269,69 +304,55 @@ app.patch('/api/leads/:id', auth, sameOrigin, (req, res) => {
 });
 
 // ---------- call flow: log one call, or close a lead ----------
-// body: { result: 'connected'|'not_connected', interest: 'interested'|'not_interested',
-//         temperature: 'Hot'|'Warm'|'Cold', follow_up: 'YYYY-MM-DD'|null, remark }
+// body: { outcome, follow_up, follow_time, temperature, next, need, budget, decision_maker, deal_value, lost_reason, remark }
 app.post('/api/leads/:id/call', auth, sameOrigin, (req, res) => {
   const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
   if (!lead) return fail(res, 404, 'Lead not found.');
   const b = req.body || {};
-  const remark = clean(b.remark, 2000);
-  const follow = b.follow_up ? String(b.follow_up) : null;
-  if (follow && !isDate(follow)) return fail(res, 400, 'Follow-up date is not valid.');
+  const r = applyCall(lead, b, { today: istToday(), hour: istHour() });
+  if (r.error) return fail(res, 400, r.error);
   const t = now();
-  const up = { last_call_at: t, updated_at: t };
-  const parts = [];
-
-  if (b.result === 'not_connected') {
-    up.last_call = 'not_connected';
-    up.call_attempts = lead.call_attempts + 1;
-    // A missed call never undoes an earlier "Interested" – it only counts the attempt.
-    if (lead.status === 'Fresh' || lead.status === 'Not connected') up.status = 'Not connected';
-    if (follow) up.follow_up = follow;
-    parts.push(`Not connected${up.call_attempts > 1 ? ` (try ${up.call_attempts})` : ''}`);
-    if (follow) parts.push(`Call back ${follow}`);
-  } else if (b.result === 'connected') {
-    if (!['interested', 'not_interested'].includes(b.interest)) return fail(res, 400, 'Choose Interested or Not interested.');
-    up.last_call = 'connected';
-    up.call_attempts = 0;
-    up.ever_connected = 1;
-    parts.push('Connected');
-    if (b.interest === 'interested') {
-      if (!TEMPERATURES.includes(b.temperature)) return fail(res, 400, 'Choose Hot, Warm or Cold.');
-      up.status = 'Interested';
-      up.priority = b.temperature;
-      up.follow_up = follow;
-      parts.push('Interested', b.temperature);
-      if (follow) parts.push(`Follow-up ${follow}`);
-    } else {
-      up.status = 'Not interested';
-      up.follow_up = null;
-      parts.push('Not interested');
-    }
-  } else {
-    return fail(res, 400, 'Choose Connected or Not connected.');
-  }
+  const up = { ...r.up, last_call_at: t, updated_at: t };
+  if (up.stage_at) up.stage_at = t;
+  const remark = clean(b.remark, 2000);
   if (remark) { up.last_remark = remark; up.last_remark_at = t; }
-
+  if (!lead.assigned_to) up.assigned_to = req.user.id; // whoever calls first owns the lead
   const keys = Object.keys(up);
   db.transaction(() => {
     db.prepare(`UPDATE leads SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...keys.map((k) => up[k]), lead.id);
-    logActivity(lead.id, req.user.id, 'Call', parts.join(' · ') + (remark ? ` — ${remark}` : ''));
+    logActivity(lead.id, req.user.id, 'Call', r.log + (remark ? ` — ${remark}` : ''));
+    if (r.auto) logActivity(lead.id, null, 'Auto', r.auto);
   })();
-  res.json({ lead: db.prepare(`${leadSelect} WHERE l.id = ?`).get(lead.id) });
+  res.json({ lead: db.prepare(`${leadSelect} WHERE l.id = ?`).get(lead.id), auto: r.auto });
 });
 
+// body: { outcome: 'Won'|'Lost', deal_value (Won), lost_reason (Lost), remark }
 app.post('/api/leads/:id/close', auth, sameOrigin, (req, res) => {
   const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
   if (!lead) return fail(res, 404, 'Lead not found.');
-  const outcome = req.body && req.body.outcome;
+  const b = req.body || {};
+  const outcome = b.outcome;
   if (!['Won', 'Lost'].includes(outcome)) return fail(res, 400, 'Choose Won or Lost.');
-  const remark = clean(req.body.remark, 2000);
+  const remark = clean(b.remark, 2000);
   const t = now();
+  const up = { status: outcome, stage_at: t, follow_up: null, follow_time: '', updated_at: t };
+  let details;
+  if (outcome === 'Won') {
+    const deal = rupees(b.deal_value);
+    if (!deal) return fail(res, 400, 'Enter the deal amount in ₹.');
+    up.deal_value = deal; up.lost_reason = '';
+    details = `Won · ${inr(deal)}`;
+  } else {
+    const reason = clean(b.lost_reason, 60);
+    if (!LOST_REASONS.includes(reason)) return fail(res, 400, 'Choose why the lead was lost.');
+    up.lost_reason = reason;
+    details = `Lost · ${reason}`;
+  }
+  if (remark) { up.last_remark = remark; up.last_remark_at = t; details += ` — ${remark}`; }
+  const keys = Object.keys(up);
   db.transaction(() => {
-    db.prepare(`UPDATE leads SET status = ?, follow_up = NULL, updated_at = ?${remark ? ', last_remark = ?, last_remark_at = ?' : ''} WHERE id = ?`)
-      .run(...(remark ? [outcome, t, remark, t, lead.id] : [outcome, t, lead.id]));
-    logActivity(lead.id, req.user.id, outcome, remark || `Marked ${outcome.toLowerCase()}`);
+    db.prepare(`UPDATE leads SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...keys.map((k) => up[k]), lead.id);
+    logActivity(lead.id, req.user.id, outcome, details);
   })();
   res.json({ lead: db.prepare(`${leadSelect} WHERE l.id = ?`).get(lead.id) });
 });
@@ -356,8 +377,9 @@ app.post('/api/leads/:id/activities', auth, sameOrigin, (req, res) => {
 // ---------- export ----------
 app.get('/api/export.csv', auth, adminOnly, (req, res) => {
   const rows = db.prepare(`${leadSelect} ORDER BY l.received_at DESC`).all();
-  const cols = ['id', 'received_at', 'name', 'phone', 'business', 'need', 'start', 'priority', 'status',
-    'follow_up', 'call_attempts', 'last_remark', 'last_remark_at', 'assigned_name', 'notes', 'source', 'campaign', 'external_id'];
+  const cols = ['id', 'received_at', 'name', 'phone', 'business', 'need', 'start', 'priority', 'status', 'lost_reason',
+    'deal_value', 'budget', 'decision_maker', 'follow_up', 'follow_time', 'call_attempts', 'last_outcome', 'last_remark', 'last_remark_at',
+    'stage_at', 'assigned_name', 'notes', 'source', 'campaign', 'external_id'];
   const esc = (v) => {
     let s = v === null || v === undefined ? '' : String(v);
     if (/^[=+\-@]/.test(s)) s = "'" + s; // stop spreadsheet formula injection
@@ -468,9 +490,11 @@ app.post('/api/admin/meta/sync', auth, adminOnly, sameOrigin, async (req, res) =
 });
 
 // ---------- static app ----------
-app.use(express.static(path.join(__dirname, '..', 'public'), { index: 'index.html', maxAge: '1h' }));
+// The page itself is never cached, so a new version reaches everyone at once; its css/js carry a ?v= tag.
+app.use(express.static(path.join(__dirname, '..', 'public'), { index: 'index.html', maxAge: '1h',
+  setHeaders: (res, file) => { if (file.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache'); } }));
 app.use('/api', (req, res) => fail(res, 404, 'Not found.'));
-app.get('/{*splat}', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
+app.get('/{*splat}', (req, res) => res.set('Cache-Control', 'no-cache').sendFile(path.join(__dirname, '..', 'public', 'index.html')));
 
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {

@@ -1,8 +1,17 @@
 'use strict';
 
-// Stages a lead moves through. Fresh → (call) Not connected / Interested / Not interested → Won / Lost.
-const STATUSES = ['Fresh', 'Not connected', 'Interested', 'Not interested', 'Won', 'Lost'];
+// Where the deal is. A call result (no answer, switched off…) is not a stage – it is logged on the lead.
+// New → Trying to reach → Qualifying → Meeting booked → Quote sent → Negotiation → Won, plus Nurture (later) and Lost.
+const STATUSES = ['New', 'Trying to reach', 'Qualifying', 'Meeting booked', 'Quote sent', 'Negotiation', 'Nurture', 'Won', 'Lost'];
+const OPEN_STAGES = ['New', 'Trying to reach', 'Qualifying', 'Meeting booked', 'Quote sent', 'Negotiation', 'Nurture'];
 const TEMPERATURES = ['Hot', 'Warm', 'Cold'];
+const LOST_REASONS = ['Not interested', 'Budget too low', 'Chose someone else', 'Already has a vendor',
+  'Unreachable', 'Not responding', 'Wrong number / Junk'];
+const BUDGETS = ['Under ₹15k', '₹15k–50k', '₹50k+'];
+// Rules for calls that did not connect.
+const MAX_TRIES = 5;          // tries without a real conversation → Lost (Unreachable)
+const MAX_CUTS = 3;           // times they cut the call → Lost (Not responding)
+const FINAL_TRY_DAYS = 30;    // an Unreachable lead comes back once for a final try
 
 const MAP = {
   new_website: 'New website',
@@ -35,4 +44,4 @@ function priorityFor(start) {
   return 'Cold';
 }
 
-module.exports = { STATUSES, TEMPERATURES, human, priorityFor };
+module.exports = { STATUSES, OPEN_STAGES, TEMPERATURES, LOST_REASONS, BUDGETS, MAX_TRIES, MAX_CUTS, FINAL_TRY_DAYS, human, priorityFor };

@@ -5,8 +5,16 @@ const BUSINESS = ['Shop / Retail', 'Doctor / Clinic / Hospital', 'Restaurant / C
   'Coaching / School / Education', 'Salon / Spa / Gym / Fitness', 'Manufacturer / Wholesaler / Trader',
   'Hotel / Travel / Tour agency', 'CA / Lawyer / Consultant', 'Other business'];
 const NEEDS = ['New website', 'Website redesign', 'Mobile app', 'WhatsApp automation / Bulk SMS', 'Branding / Logo', 'SEO / Digital marketing'];
+// The deal path, in order. Nurture and Lost sit beside it.
+const PATH = ['New', 'Trying to reach', 'Qualifying', 'Meeting booked', 'Quote sent', 'Negotiation', 'Won'];
+const OUTCOME = {
+  no_answer: 'No answer', switched_off: 'Switched off', busy: 'Cut the call / Busy', wrong_number: 'Wrong number',
+  interested: 'Interested', not_now: 'Not now', not_interested: 'Not interested',
+};
+const STUCK_DAYS = 7;
 
-let ME = null, STATUSES = [], TEMPS = ['Hot', 'Warm', 'Cold'], TYPES = [], USERS = [], LEADS = [];
+let ME = null, STATUSES = [], OPEN = [], TEMPS = ['Hot', 'Warm', 'Cold'], LOST_REASONS = [], BUDGETS = [], RULES = { maxTries: 5, maxCuts: 3, finalTryDays: 30 };
+let TYPES = [], USERS = [], LEADS = [];
 let view = 'dash', openId = null, resetFor = null, lastVersion = null, lastMax = 0;
 
 const $ = (s) => document.querySelector(s);
@@ -26,53 +34,66 @@ async function api(method, url, body) {
   return data;
 }
 
-function toast(t) { const el = $('#toast'); el.textContent = t; el.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => (el.hidden = true), 2200); }
+function toast(t, ms) { const el = $('#toast'); el.textContent = t; el.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => (el.hidden = true), ms || 2200); }
 function today() { return new Date().toLocaleDateString('en-CA', { timeZone: TZ }); }
+function hourNow() { return Number(new Date().toLocaleString('en-GB', { timeZone: TZ, hour: '2-digit', hour12: false })); }
+function addDays(n) { const [y, m, dd] = today().split('-').map(Number); return new Date(Date.UTC(y, m - 1, dd + n)).toISOString().slice(0, 10); }
 function fmt(iso) { const d = new Date(iso); return isNaN(d) ? '—' : d.toLocaleString('en-IN', { timeZone: TZ, day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }); }
-function fmtDay(s) { if (!s) return ''; return new Date(s + 'T12:00:00+05:30').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: TZ }); }
-function ago(iso) { const m = (Date.now() - new Date(iso)) / 60000; if (m < 60) return Math.max(1, Math.round(m)) + ' min ago'; const h = m / 60; if (h < 24) return Math.round(h) + ' h ago'; return Math.round(h / 24) + ' d ago'; }
+function fmtDay(s) {
+  if (!s) return '';
+  if (s === today()) return 'Today';
+  if (s === addDays(1)) return 'Tomorrow';
+  return new Date(s + 'T12:00:00+05:30').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: TZ });
+}
+function fmtTime(t) { if (!t) return ''; const [h, m] = t.split(':').map(Number); return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h < 12 ? 'am' : 'pm'}`; }
+function nextWhen(l) { return l.follow_up ? fmtDay(l.follow_up) + (l.follow_time ? ' ' + fmtTime(l.follow_time) : '') : ''; }
+function ago(iso) { const m = (Date.now() - new Date(iso)) / 60000; if (m < 60) return Math.max(1, Math.round(m)) + ' min'; const h = m / 60; if (h < 24) return Math.round(h) + ' h'; return Math.round(h / 24) + ' d'; }
+function inr(n) { return n ? '₹' + Number(n).toLocaleString('en-IN') : ''; }
 function wa(p) { let d = String(p || '').replace(/\D/g, ''); if (d.length === 10) d = '91' + d; return d; }
-function isOpen(l) { return l.status !== 'Won' && l.status !== 'Lost' && l.status !== 'Not interested'; }
-function tries(n) { return n > 1 ? ' ×' + n : ''; }
-/** Short "where is this lead" text, e.g. "Not connected ×2" or "Interested · Hot". */
+function isOpen(l) { return l.status !== 'Won' && l.status !== 'Lost'; }
+/** An Unreachable lead comes back once, 30 days later, for a final try. */
+function isFinalTry(l) { return l.status === 'Lost' && l.lost_reason === 'Unreachable' && !!l.follow_up; }
+function isDue(l) { return !!l.follow_up && l.follow_up <= today() && (isOpen(l) || isFinalTry(l)); }
+function daysInStage(l) { return l.stage_at ? Math.floor((Date.now() - new Date(l.stage_at)) / 864e5) : 0; }
+function isStuck(l) { return isOpen(l) && l.status !== 'New' && l.status !== 'Nurture' && daysInStage(l) > STUCK_DAYS; }
+/** Short "where is this lead" text, e.g. "Trying to reach · try 2/5" or "Lost · Budget too low". */
 function stageText(l) {
-  if (l.status === 'Not connected') return 'Not connected' + tries(l.call_attempts);
-  if (l.status === 'Interested') return 'Interested · ' + l.priority + (l.last_call === 'not_connected' ? ' · no answer' + tries(l.call_attempts) : '');
+  if (l.status === 'Trying to reach') return `Trying to reach · try ${l.call_attempts || 1}/${RULES.maxTries}`;
+  if (l.status === 'Lost') return isFinalTry(l) ? 'Lost · final try ' + fmtDay(l.follow_up) : 'Lost' + (l.lost_reason ? ' · ' + l.lost_reason : '');
+  if (isOpen(l) && l.status !== 'New' && l.last_call === 'not_connected' && l.call_attempts) return `${l.status} · no answer ×${l.call_attempts}`;
   return l.status;
 }
-function stagePill(l) { return `<span class="pill ${sCls(l.status)}">${esc(stageText(l))}</span>`; }
-/** The full step-by-step track: Fresh → Call → Interested? → Hot/Warm/Cold → Follow-up → Won/Lost */
-function stageTrack(l) {
-  const st = l.status, called = st !== 'Fresh', ni = st === 'Not interested';
-  const interested = st === 'Interested' || ((st === 'Won' || st === 'Lost') && l.ever_connected);
-  const steps = [];
-  steps.push(['Fresh lead', st === 'Fresh' ? 'k-fresh' : 'done']);
-  if (!called) steps.push(['Call', 'now']);
-  else if (!l.ever_connected) steps.push(['Not connected' + tries(l.call_attempts), 'k-nc']);
-  else steps.push(['Connected', 'k-ok']);
-  if (ni) steps.push(['Not interested', 'k-bad']);
-  else if (interested) steps.push(['Interested', 'k-ok']);
-  else steps.push(['Interested?', '']);
-  if (interested) steps.push([l.priority, 'k-' + l.priority]);
-  else steps.push(['Hot / Warm / Cold', ni ? 'skip' : '']);
-  if (st === 'Interested') {
-    if (l.last_call === 'not_connected') steps.push(['Follow-up · no answer' + tries(l.call_attempts), 'k-nc']);
-    else if (l.follow_up) steps.push(['Follow-up ' + fmtDay(l.follow_up), isDue(l) ? 'k-due' : 'done']);
-    else steps.push(['Set follow-up', 'now']);
-  } else if (st === 'Not connected' && l.follow_up) steps.push(['Call back ' + fmtDay(l.follow_up), isDue(l) ? 'k-due' : 'done']);
-  else steps.push(['Follow-up', ni || st === 'Won' || st === 'Lost' ? 'skip' : '']);
-  if (st === 'Won') steps.push(['Won', 'k-won']);
-  else if (st === 'Lost') steps.push(['Lost', 'k-bad']);
-  else steps.push(['Won / Lost', ni ? 'skip' : '']);
-  return `<div class="track-wrap"><ol class="track" aria-label="Lead stage">${steps.map(([t, c], i) =>
-    `<li class="${c && c !== 'skip' && c !== 'now' ? 'reached' : ''}"><span class="step ${c}"><i>${i + 1}</i>${esc(t)}</span></li>`).join('')}</ol></div>`;
-}
-function isDue(l) { return !!l.follow_up && l.follow_up <= today() && isOpen(l); }
 function sCls(s) { return 's-' + String(s).replace(/\s+/g, '-'); }
+function stagePill(l) { return `<span class="pill ${sCls(l.status)}">${esc(stageText(l))}</span>`; }
+function stuckPill(l) { return isStuck(l) ? `<span class="pill stuck" title="No progress for ${daysInStage(l)} days">Stuck ${daysInStage(l)} d</span>` : ''; }
+/** The deal path with the lead's position: New → Trying to reach → … → Won (Nurture / Lost shown at the end). */
+function stageTrack(l) {
+  const cur = PATH.indexOf(l.status);
+  const steps = PATH.map((s, i) => {
+    let c = '';
+    if (cur >= 0 && i < cur) c = 'done';
+    if (i === cur) c = s === 'Won' ? 'k-won' : 'k-cur';
+    return [s, c];
+  });
+  if (l.status === 'Nurture') steps.push(['Nurture · check back ' + fmtDay(l.follow_up), 'k-nur']);
+  if (l.status === 'Lost') steps.push([stageText(l), 'k-bad']);
+  return `<div class="track-wrap"><ol class="track" aria-label="Deal stage">${steps.map(([t, c], i) =>
+    `<li class="${c ? 'reached' : ''}"><span class="step ${c}"${c === 'k-cur' ? ' aria-current="step"' : ''}><i>${i < PATH.length ? i + 1 : '•'}</i>${esc(t)}</span></li>`).join('')}</ol></div>`;
+}
 function userOptions(sel, withNone) {
   return (withNone ? '<option value="">Unassigned</option>' : '') +
     USERS.map((u) => `<option value="${u.id}" ${String(u.id) === String(sel) ? 'selected' : ''}>${esc(u.name)}</option>`).join('');
 }
+/** Ready-made WhatsApp messages so nobody has to type the same intro 40 times a day. */
+function waText(kind, l) {
+  const first = String(l.name || '').trim().split(/\s+/)[0] || 'there';
+  const me = String(ME.name || '').trim().split(/\s+/)[0];
+  const need = l.need ? l.need.charAt(0).toLowerCase() + l.need.slice(1) : 'website';
+  if (kind === 'busy') return `Sorry to disturb you, ${first}! This is ${me} from Trata Digital about your ${need} enquiry on Instagram. When can I call you at a better time?`;
+  if (kind === 'details') return `Hi ${first}, thank you for your time today! This is ${me} from Trata Digital. As discussed, I'm sharing the details for your ${need} here. Talk soon!`;
+  return `Hi ${first}, this is ${me} from Trata Digital about your ${need} enquiry on Instagram. I tried calling you. When is a good time to talk?`;
+}
+function waLink(kind, l) { const w = wa(l.phone); return w ? `https://wa.me/${w}?text=${encodeURIComponent(waText(kind, l))}` : ''; }
 
 // ---------- login ----------
 function showLogin(msg) {
@@ -105,7 +126,9 @@ $('#setupForm').addEventListener('submit', async (e) => {
 
 async function start() {
   const meta = await api('GET', '/api/meta');
-  ME = meta.me; STATUSES = meta.statuses; TEMPS = meta.temperatures || TEMPS; TYPES = meta.activityTypes; USERS = meta.users;
+  ME = meta.me; STATUSES = meta.statuses; OPEN = meta.openStages || []; TEMPS = meta.temperatures || TEMPS;
+  LOST_REASONS = meta.lostReasons || []; BUDGETS = meta.budgets || []; RULES = meta.rules || RULES;
+  TYPES = meta.activityTypes; USERS = meta.users;
   $('#gate').hidden = true; $('#setup').hidden = true; $('#booting').hidden = true; $('#app').hidden = false;
   $('#userBtn').textContent = ME.name + ' ▾';
   $('#teamTab').hidden = ME.role !== 'admin'; $('#exportBtn').hidden = ME.role !== 'admin';
@@ -136,41 +159,57 @@ function render() {
   renderDash(); renderList(); renderBoard();
 }
 
-function renderDash() {
-  const L = LEADS, t = today();
-  const fresh = L.filter((l) => l.status === 'Fresh').length;
-  const nc = L.filter((l) => l.status === 'Not connected').length;
-  const hotInt = L.filter((l) => l.status === 'Interested' && l.priority === 'Hot').length;
-  const due = L.filter(isDue).length;
-  const won = L.filter((l) => l.status === 'Won').length;
-  const todayC = L.filter((l) => new Date(l.received_at).toLocaleDateString('en-CA', { timeZone: TZ }) === t).length;
-  const closed = L.filter((l) => !isOpen(l)).length;
-  const conv = closed ? Math.round((won / closed) * 100) : 0;
-  const tiles = [['New today', todayC, '', ''], ['Fresh · not called', fresh, fresh ? 'fresh' : '', 'Fresh'], ['Not connected', nc, nc ? 'nc' : '', 'Not connected'],
-    ['Interested · Hot', hotInt, hotInt ? 'hot' : '', 'hotint'], ['Follow-ups due', due, due ? 'alert' : '', 'due'], ['Won', won, 'good', 'Won'], ['Win rate (closed)', conv + '%', '', '']];
-  $('#kpis').innerHTML = tiles.map(([l, v, c, go]) => go
-    ? `<button class="kpi ${c}" type="button" data-go="${go}"><b>${v}</b><span>${l}</span></button>`
-    : `<div class="kpi ${c}"><b>${v}</b><span>${l}</span></div>`).join('');
+const RANK = { Hot: 0, Warm: 1, Cold: 2 };
+const byHotThenOld = (a, b) => (RANK[a.priority] ?? 3) - (RANK[b.priority] ?? 3) || a.received_at.localeCompare(b.received_at);
+const byWhen = (a, b) => a.follow_up.localeCompare(b.follow_up) || (RANK[a.priority] ?? 3) - (RANK[b.priority] ?? 3) || (a.follow_time || '99').localeCompare(b.follow_time || '99');
 
-  const todo = [
-    ...L.filter(isDue).sort((a, b) => a.follow_up.localeCompare(b.follow_up)).map((l) => {
-      const what = l.status === 'Not connected' ? 'Call back' : 'Follow-up';
-      return [l, l.follow_up < t ? `Overdue ${what.toLowerCase()} · ${fmtDay(l.follow_up)}` : `${what} today`]; }),
-    ...L.filter((l) => l.status === 'Fresh' && l.priority === 'Hot').map((l) => [l, 'Fresh hot lead · not called · ' + ago(l.received_at)]),
-    ...L.filter((l) => l.status === 'Fresh' && l.priority !== 'Hot').map((l) => [l, 'Fresh lead · not called · ' + ago(l.received_at)]),
-    ...L.filter((l) => l.status === 'Not connected' && !l.follow_up).map((l) => [l, 'Not connected' + tries(l.call_attempts) + ' · try again']),
+function renderDash() {
+  const L = LEADS, t = today(), month = t.slice(0, 7);
+  const fresh = L.filter((l) => l.status === 'New');
+  const overdue = L.filter((l) => isDue(l) && l.follow_up < t).sort(byWhen);
+  const dueToday = L.filter((l) => isDue(l) && l.follow_up === t).sort(byWhen);
+  const meetings = dueToday.filter((l) => l.status === 'Meeting booked').length;
+  const stuck = L.filter(isStuck).length;
+  const pipeline = L.filter((l) => l.status === 'Quote sent' || l.status === 'Negotiation').reduce((s, l) => s + (l.deal_value || 0), 0);
+  const wonMonth = L.filter((l) => l.status === 'Won' && String(l.stage_at || '').slice(0, 7) === month);
+  const won = L.filter((l) => l.status === 'Won').length, lost = L.filter((l) => l.status === 'Lost').length;
+  const rate = won + lost ? Math.round((won / (won + lost)) * 100) + '%' : '—';
+  const tiles = [
+    ['New · call now', fresh.length, fresh.length ? 'fresh' : '', 'New'],
+    ['Overdue', overdue.length, overdue.length ? 'alert' : '', 'due'],
+    ['Due today', dueToday.length, dueToday.length ? 'nc' : '', 'due'],
+    ['Meetings today', meetings, meetings ? 'hot' : '', 'Meeting booked'],
+    ['Stuck > 7 days', stuck, stuck ? 'alert' : '', 'stuck'],
+    ['Pipeline (quotes)', inr(pipeline) || '₹0', '', 'board'],
+    ['Won this month', wonMonth.length + (wonMonth.length ? ' · ' + inr(wonMonth.reduce((s, l) => s + (l.deal_value || 0), 0)) : ''), 'good', 'Won'],
+    ['Win rate', rate, '', ''],
   ];
-  const seen = new Set();
-  const list = todo.filter(([l]) => !seen.has(l.id) && seen.add(l.id)).slice(0, 12);
-  $('#todo').innerHTML = list.length ? list.map(([l, why]) => `<button class="todo-row" type="button" data-id="${l.id}">
+  $('#kpis').innerHTML = tiles.map(([l, v, c, go]) => go
+    ? `<button class="kpi ${c}" type="button" data-go="${go}"><b>${esc(v)}</b><span>${l}</span></button>`
+    : `<div class="kpi ${c}"><b>${esc(v)}</b><span>${l}</span></div>`).join('');
+
+  const row = (l, why) => `<button class="todo-row" type="button" data-id="${l.id}">
       <span class="pill p-${esc(l.priority)}">${esc(l.priority)}</span>
       <span class="todo-main"><strong>${esc(l.name || 'Unnamed')}</strong><small>${esc(why)}${l.assigned_name ? ' · ' + esc(l.assigned_name) : ''}</small></span>
-      ${stagePill(l)}</button>`).join('')
-    : '<div class="empty">All caught up. No follow-ups due and no new leads waiting.</div>';
+      ${stagePill(l)}</button>`;
+  const section = (title, cls, list, why) => list.length
+    ? `<div class="todo-sec ${cls}"><h3>${title} <span>${list.length}</span></h3>${list.slice(0, 15).map((l) => row(l, why(l))).join('')}${list.length > 15 ? `<small class="more-n">+ ${list.length - 15} more</small>` : ''}</div>` : '';
+  const nextWhat = (l) => l.status === 'Meeting booked' ? 'Meeting' : isFinalTry(l) ? 'Final try' : l.status === 'Trying to reach' ? 'Try again' : l.status === 'Nurture' ? 'Check back' : 'Follow up';
+  const html = [
+    section('🔴 Call now · new leads', 's-new', fresh.slice().sort(byHotThenOld), (l) => `Waiting ${ago(l.received_at)}${l.need ? ' · ' + l.need : ''}`),
+    section('⏰ Overdue', 's-over', overdue, (l) => `${nextWhat(l)} · was due ${nextWhen(l)}${l.last_remark ? ' · “' + l.last_remark + '”' : ''}`),
+    section('📅 Today', 's-today', dueToday, (l) => `${nextWhat(l)}${l.follow_time ? ' at ' + fmtTime(l.follow_time) : ''}${l.last_remark ? ' · “' + l.last_remark + '”' : ''}`),
+  ].join('');
+  $('#todo').innerHTML = html || '<div class="empty">All caught up. No new leads waiting and nothing due today.</div>';
 
-  const max = Math.max(1, ...STATUSES.map((s) => L.filter((l) => l.status === s).length));
-  $('#bars').innerHTML = STATUSES.map((s) => { const n = L.filter((l) => l.status === s).length;
-    return `<div class="bar"><span>${esc(s)}</span><div class="bar-track"><div class="bar-fill" style="width:${(n / max) * 100}%"></div></div><b>${n}</b></div>`; }).join('');
+  const funnel = PATH.concat(['Nurture']);
+  const max = Math.max(1, ...funnel.map((s) => L.filter((l) => l.status === s).length));
+  $('#bars').innerHTML = funnel.map((s) => { const n = L.filter((l) => l.status === s).length;
+    return `<button class="bar" type="button" data-go="${esc(s)}"><span>${esc(s)}</span><div class="bar-track"><div class="bar-fill ${sCls(s)}" style="width:${(n / max) * 100}%"></div></div><b>${n}</b></button>`; }).join('');
+  const reasons = {}; L.filter((l) => l.status === 'Lost').forEach((l) => { const k = l.lost_reason || 'No reason given'; reasons[k] = (reasons[k] || 0) + 1; });
+  const rk = Object.entries(reasons).sort((a, b) => b[1] - a[1]); const rm = Math.max(1, ...rk.map((x) => x[1]));
+  $('#reasons').innerHTML = rk.length ? rk.map(([k, n]) => `<div class="bar"><span>${esc(k)}</span><div class="bar-track"><div class="bar-fill s-Lost" style="width:${(n / rm) * 100}%"></div></div><b>${n}</b></div>`).join('')
+    : '<div class="empty">No lost leads yet.</div>';
   const needs = {}; L.forEach((l) => { const k = l.need || 'Not given'; needs[k] = (needs[k] || 0) + 1; });
   const nk = Object.entries(needs).sort((a, b) => b[1] - a[1]); const nm = Math.max(1, ...nk.map((x) => x[1]));
   $('#needs').innerHTML = nk.length ? nk.map(([k, n]) => `<div class="bar"><span>${esc(k)}</span><div class="bar-track"><div class="bar-fill" style="width:${(n / nm) * 100}%;opacity:.7"></div></div><b>${n}</b></div>`).join('')
@@ -180,9 +219,10 @@ function renderDash() {
 function filtered() {
   const q = $('#q').value.toLowerCase(), fs = $('#fStatus').value, fp = $('#fPrio').value, fa = $('#fAssigned').value, fd = $('#fDue').value;
   const stOk = (l) => !fs || (fs === '__open' ? isOpen(l) : l.status === fs);
+  const dueOk = (l) => !fd || (fd === 'stuck' ? isStuck(l) : isDue(l));
   return LEADS.filter((l) => stOk(l) && (!fp || l.priority === fp) &&
-    (!fa || (fa === 'none' ? !l.assigned_to : String(l.assigned_to) === fa)) && (!fd || isDue(l)) &&
-    (!q || [l.name, l.phone, l.need, l.business, l.notes, l.last_remark, l.assigned_name].join(' ').toLowerCase().includes(q)));
+    (!fa || (fa === 'none' ? !l.assigned_to : String(l.assigned_to) === fa)) && dueOk(l) &&
+    (!q || [l.name, l.phone, l.need, l.business, l.notes, l.last_remark, l.assigned_name, l.lost_reason].join(' ').toLowerCase().includes(q)));
 }
 function renderList() {
   const L = filtered();
@@ -190,20 +230,21 @@ function renderList() {
   $('#rows').innerHTML = L.length ? L.map((l) => `<tr data-id="${l.id}" tabindex="0">
     <td><strong>${esc(l.name || 'Unnamed')}</strong><span class="sub num">${esc(l.phone)}</span></td>
     <td><span class="pill p-${esc(l.priority)}">${esc(l.priority)}</span></td>
-    <td>${stagePill(l)}${l.last_remark ? `<span class="sub remark-line">${esc(l.last_remark)}</span>` : ''}</td>
-    <td class="hide-sm">${esc(l.need || '—')}<span class="sub">${esc(l.business)}</span></td>
-    <td>${l.follow_up ? `<span class="${isDue(l) ? 'due' : ''}">${esc(fmtDay(l.follow_up))}</span>` : '—'}</td>
+    <td>${stagePill(l)} ${stuckPill(l)}${l.last_remark ? `<span class="sub remark-line">${esc(l.last_remark)}</span>` : ''}</td>
+    <td class="hide-sm">${esc(l.need || '—')}<span class="sub">${esc(l.business)}${l.deal_value ? ' · ' + inr(l.deal_value) : ''}</span></td>
+    <td>${l.follow_up ? `<span class="${isDue(l) ? 'due' : ''}">${esc(nextWhen(l))}</span>` : '—'}</td>
     <td class="hide-sm">${esc(l.assigned_name || '—')}</td>
     <td class="hide-sm">${esc(fmt(l.received_at))}</td></tr>`).join('')
     : '<tr><td colspan="7" class="empty">No leads match these filters.</td></tr>';
 }
 function renderBoard() {
-  $('#board').innerHTML = STATUSES.map((s) => {
-    const rank = { Hot: 0, Warm: 1, Cold: 2 };
-    const L = LEADS.filter((l) => l.status === s).sort((a, b) => s === 'Interested' ? (rank[a.priority] ?? 3) - (rank[b.priority] ?? 3) : 0);
-    return `<div class="col"><div class="col-h">${esc(s)} <span>${L.length}</span></div>${L.map((l) => `<button class="lead-card" type="button" data-id="${l.id}">
-      <strong>${esc(l.name || 'Unnamed')}</strong><small>${esc(l.need || l.business || '')}</small>${l.last_remark ? `<small class="remark-line">“${esc(l.last_remark)}”</small>` : ''}
-      <div class="row"><span class="pill p-${esc(l.priority)}">${esc(l.priority)}</span>${l.status === 'Not connected' && l.call_attempts > 1 ? `<small>${l.call_attempts} tries</small>` : ''}${l.follow_up ? `<small class="${isDue(l) ? 'due' : ''}">↻ ${esc(fmtDay(l.follow_up))}</small>` : ''}${l.assigned_name ? `<small>· ${esc(l.assigned_name)}</small>` : ''}</div></button>`).join('')}</div>`;
+  const cols = PATH.concat(['Nurture', 'Lost']);
+  $('#board').innerHTML = cols.map((s) => {
+    const L = LEADS.filter((l) => l.status === s).sort((a, b) => (RANK[a.priority] ?? 3) - (RANK[b.priority] ?? 3) || (a.follow_up || '9').localeCompare(b.follow_up || '9'));
+    const sum = L.reduce((x, l) => x + (l.deal_value || 0), 0);
+    return `<div class="col"><div class="col-h"><span class="col-t ${sCls(s)}">${esc(s)}</span> <span>${L.length}${sum && s !== 'Lost' ? ' · ' + inr(sum) : ''}</span></div>${L.map((l) => `<button class="lead-card" type="button" data-id="${l.id}">
+      <strong>${esc(l.name || 'Unnamed')}</strong><small>${esc(l.need || l.business || '')}${l.deal_value ? ' · <b>' + inr(l.deal_value) + '</b>' : ''}</small>${l.last_remark ? `<small class="remark-line">“${esc(l.last_remark)}”</small>` : ''}
+      <div class="row"><span class="pill p-${esc(l.priority)}">${esc(l.priority)}</span>${s === 'Trying to reach' ? `<small>try ${l.call_attempts || 1}/${RULES.maxTries}</small>` : ''}${s === 'Lost' && l.lost_reason ? `<small>${esc(l.lost_reason)}</small>` : ''}${l.follow_up ? `<small class="${isDue(l) ? 'due' : ''}">↻ ${esc(nextWhen(l))}</small>` : ''}${stuckPill(l)}${l.assigned_name ? `<small>· ${esc(l.assigned_name)}</small>` : ''}</div></button>`).join('')}</div>`;
   }).join('');
 }
 
@@ -215,30 +256,43 @@ async function openLead(id) {
   let d; try { d = await api('GET', '/api/leads/' + id); } catch (e) { dr.innerHTML = `<div class="loading">${esc(e.message)}</div>`; return; }
   if (openId !== id) return;
   const l = d.lead, w = wa(l.phone);
-  const c = { result: '', interest: l.status === 'Interested' ? 'interested' : '', temp: l.priority, follow: '', remark: '' };
+  const early = l.status === 'New' || l.status === 'Trying to reach';
+  const c = { outcome: '', temp: l.priority, next: '', follow: '', time: '', need: l.need || '', budget: l.budget || '', dm: l.decision_maker || '',
+    deal: l.deal_value || '', reason: '', remark: '', closing: '', closeDeal: l.deal_value || '', closeReason: '' };
   dr.innerHTML = `<div class="d-head"><div><h3>${esc(l.name || 'Unnamed')}</h3>
-      <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap"><span class="pill p-${esc(l.priority)}">${esc(l.priority)}</span>${stagePill(l)}</div></div>
+      <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap"><span class="pill p-${esc(l.priority)}">${esc(l.priority)}</span>${stagePill(l)}${stuckPill(l)}</div></div>
       <button class="x" type="button" id="dClose" aria-label="Close">&times;</button></div>
     <div class="d-body">
       <div class="contact"><span class="num" style="font-size:15px">${esc(l.phone || 'No phone')}</span>
-        ${w ? `<a class="btn primary" href="https://wa.me/${w}" target="_blank" rel="noopener">WhatsApp</a><a class="btn" href="tel:+${w}">Call</a>` : ''}</div>
+        ${w ? `<a class="btn primary" href="tel:+${w}">Call</a><a class="btn" href="https://wa.me/${w}" target="_blank" rel="noopener">WhatsApp</a>` : ''}</div>
       ${stageTrack(l)}
+      ${l.follow_up && (isOpen(l) || isFinalTry(l)) ? `<div class="nextup ${isDue(l) ? 'is-due' : ''}"><small>Next</small> ${esc(nextWhen(l))}${l.last_outcome ? ` · last call: ${esc(OUTCOME[l.last_outcome] || l.last_outcome)}` : ''}</div>` : ''}
       ${l.last_remark ? `<div class="last-remark"><small>Last remark · ${esc(fmt(l.last_remark_at))}</small><p>${esc(l.last_remark)}</p></div>` : ''}
-      <section class="callbox" aria-labelledby="callTitle"><h2 id="callTitle">${l.status === 'Fresh' ? 'Log first call' : 'Log a call'}</h2><div id="callSteps"></div></section>
+      ${l.status === 'Won' ? `<div class="wonbox">🎉 Won${l.deal_value ? ' · ' + inr(l.deal_value) : ''}. Hand over to the project team.</div>`
+        : `<section class="callbox" aria-labelledby="callTitle"><h2 id="callTitle">${l.status === 'New' ? 'Log first call' : 'Log a call'}</h2><div id="callSteps"></div></section>`}
       <dl class="facts">
         <dt>Needs</dt><dd>${esc(l.need || '—')}</dd>
+        <dt>Budget</dt><dd>${esc(l.budget || '—')}</dd>
+        <dt>Decision maker</dt><dd>${l.decision_maker === 'yes' ? 'Yes' : l.decision_maker === 'no' ? 'No' : '—'}</dd>
+        <dt>Deal value</dt><dd>${esc(inr(l.deal_value) || '—')}</dd>
         <dt>Business</dt><dd>${esc(l.business || '—')}</dd>
         <dt>Wants to start</dt><dd>${esc(l.start || '—')}</dd>
-        <dt>Came in</dt><dd>${esc(fmt(l.received_at))} (${esc(ago(l.received_at))})</dd>
+        <dt>Came in</dt><dd>${esc(fmt(l.received_at))} (${esc(ago(l.received_at))} ago)</dd>
         <dt>Source</dt><dd>${esc(l.campaign || l.source || '—')}</dd>
+        <dt>In this stage</dt><dd>${daysInStage(l)} day${daysInStage(l) === 1 ? '' : 's'}</dd>
       </dl>
       <details class="more"><summary>Edit details</summary>
       <form class="form" id="dForm">
         <label>Follow-up date<input id="d-follow" type="date" value="${esc(l.follow_up || '')}"></label>
+        <label>Time<input id="d-time" type="time" value="${esc(l.follow_time || '')}"></label>
         <label>Lead type<select id="d-prio">${TEMPS.map((t) => `<option ${t === l.priority ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
         <label>Stage (manual fix)<select id="d-status">${STATUSES.map((s) => `<option ${s === l.status ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></label>
-        <label>Assigned to<select id="d-assigned">${userOptions(l.assigned_to, true)}</select></label>
-        <label class="full">Notes<textarea id="d-notes" maxlength="5000" placeholder="Budget, requirement, anything to remember…">${esc(l.notes)}</textarea></label>
+        <label>Lost reason<select id="d-reason"><option value="">—</option>${LOST_REASONS.map((r) => `<option ${r === l.lost_reason ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select></label>
+        <label>Deal value (₹)<input id="d-deal" inputmode="numeric" value="${esc(l.deal_value || '')}" placeholder="e.g. 25000"></label>
+        <label>Budget<select id="d-budget"><option value="">—</option>${BUDGETS.map((x) => `<option ${x === l.budget ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select></label>
+        <label>Decision maker<select id="d-dm"><option value="">—</option><option value="yes" ${l.decision_maker === 'yes' ? 'selected' : ''}>Yes</option><option value="no" ${l.decision_maker === 'no' ? 'selected' : ''}>No</option></select></label>
+        <label class="full">Assigned to<select id="d-assigned">${userOptions(l.assigned_to, true)}</select></label>
+        <label class="full">Notes<textarea id="d-notes" maxlength="5000" placeholder="Anything to remember…">${esc(l.notes)}</textarea></label>
         <div class="full d-actions"><button class="btn primary" type="submit" id="dSave">Save changes</button><span class="err" id="dErr" role="alert"></span></div>
       </form></details>
       <div><h2>History</h2>
@@ -250,55 +304,115 @@ async function openLead(id) {
       ${ME.role === 'admin' ? '<div><button class="linkbtn danger" type="button" id="dDelete">Delete this lead</button></div>' : ''}
     </div>`;
 
-  // ----- guided "log a call" steps -----
-  const addDays = (n) => { const [y, m, dd] = today().split('-').map(Number); return new Date(Date.UTC(y, m - 1, dd + n)).toISOString().slice(0, 10); };
-  const opt = (field, val, label, cls) => `<button type="button" class="opt ${cls}" data-f="${field}" data-v="${val}" aria-pressed="${c[field] === val}">${label}</button>`;
+  // ----- guided "log a call" -----
+  const NC = ['no_answer', 'switched_off', 'busy'];
+  const defaultNext = (o) => o === 'no_answer' ? (hourNow() < 17 ? addDays(0) : addDays(1)) : o === 'switched_off' ? addDays(1) : addDays(2);
+  const opt = (field, val, label, cls) => `<button type="button" class="opt ${cls || ''}" data-f="${field}" data-v="${esc(val)}" aria-pressed="${String(c[field]) === String(val)}">${label}</button>`;
+  const chips = (list) => `<div class="datebar">${list.map(([n, t]) => `<button type="button" class="chip" data-day="${n}" aria-pressed="${c.follow === addDays(n)}">${t}</button>`).join('')}
+      <input type="date" id="c-follow" min="${today()}" value="${esc(c.follow)}" aria-label="Date"></div>`;
+  const waBtn = (kind, label) => w ? `<a class="btn wa" href="${esc(waLink(kind, l))}" target="_blank" rel="noopener" data-wa="${kind}">💬 ${label}</a>` : '';
   function drawCall() {
-    let h = `<div class="q"><span>1 · Call result</span><div class="seg">${opt('result', 'connected', 'Connected', 'o-ok')}${opt('result', 'not_connected', 'Not connected', 'o-nc')}</div></div>`;
-    if (c.result === 'connected') {
-      h += `<div class="q"><span>2 · Is the lead interested?</span><div class="seg">${opt('interest', 'interested', 'Interested', 'o-ok')}${opt('interest', 'not_interested', 'Not interested', 'o-bad')}</div></div>`;
-      if (c.interest === 'interested') h += `<div class="q"><span>3 · Lead type</span><div class="seg">${TEMPS.map((t) => opt('temp', t, t, 'o-' + t)).join('')}</div></div>`;
+    const box = $('#callSteps'); if (!box) return;
+    const o = c.outcome;
+    let h = `<div class="q"><span>What happened on the call?</span>
+      <div class="grp"><small>📵 Didn't talk</small><div class="seg">${opt('outcome', 'no_answer', 'No answer', 'o-nc')}${opt('outcome', 'switched_off', 'Switched off', 'o-nc')}${opt('outcome', 'busy', 'Cut / Busy', 'o-nc')}${opt('outcome', 'wrong_number', 'Wrong number', 'o-bad')}</div></div>
+      <div class="grp"><small>📞 Talked</small><div class="seg">${opt('outcome', 'interested', 'Interested', 'o-ok')}${opt('outcome', 'not_now', 'Not now', 'o-Warm')}${opt('outcome', 'not_interested', 'Not interested', 'o-bad')}</div></div></div>`;
+    if (NC.includes(o)) {
+      const tryNo = (l.call_attempts || 0) + 1, cuts = (l.cut_count || 0) + (o === 'busy' ? 1 : 0);
+      if (l.status === 'Lost') h += `<p class="note">Final try. If they don't answer, the lead stays Lost.</p>`;
+      else if (early && cuts >= RULES.maxCuts) h += `<p class="note warn">Cut ${cuts} times → this moves the lead to <b>Lost (Not responding)</b>.</p>`;
+      else if (early && tryNo >= RULES.maxTries) h += `<p class="note warn">Try ${tryNo} of ${RULES.maxTries} → this moves the lead to <b>Lost (Unreachable)</b>. It comes back once in ${RULES.finalTryDays} days for a final try.</p>`;
+      else {
+        h += `<div class="q"><span>Next try ${early ? `· this is try ${tryNo} of ${RULES.maxTries}` : ''}</span>${chips([[0, 'Later today'], [1, 'Tomorrow'], [2, 'In 2 days']])}
+          <small class="hint">${o === 'no_answer' ? 'Call again at a different time of day.' : o === 'switched_off' ? 'Phone may be dead or they are travelling. Try tomorrow.' : 'They may be driving or in a meeting. Give them 2 days.'}</small></div>`;
+      }
+      h += `<div class="q"><span>Send on WhatsApp now</span><div class="seg">${waBtn(o === 'busy' ? 'busy' : 'intro', o === 'busy' ? 'Polite “better time?” message' : 'Intro message')}</div></div>`;
+    } else if (o === 'wrong_number') {
+      h += `<p class="note">Moves the lead to <b>Lost (Wrong number / Junk)</b>.</p>`;
+    } else if (o === 'interested') {
+      const late = l.status === 'Quote sent' || l.status === 'Negotiation';
+      h += `<div class="q"><span>Lead type</span><div class="seg">${TEMPS.map((t) => opt('temp', t, t, 'o-' + t)).join('')}</div></div>
+        <div class="q"><span>Qualify · 4 questions</span>
+          <label class="mini-l">1 · What do they need?<input id="c-need" list="needList" value="${esc(c.need)}" placeholder="e.g. website + WhatsApp automation" maxlength="120"></label>
+          <datalist id="needList">${NEEDS.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
+          <div class="mini-l">2 · Budget<div class="seg">${BUDGETS.map((b) => opt('budget', b, esc(b))).join('')}</div></div>
+          <div class="mini-l">3 · Wants to start: <b>${esc(l.start || 'not asked yet')}</b> <small class="hint">(set Hot / Warm / Cold above)</small></div>
+          <div class="mini-l">4 · Decision maker?<div class="seg">${opt('dm', 'yes', 'Yes')}${opt('dm', 'no', 'No')}</div></div></div>
+        <div class="q"><span>Next step</span><div class="seg">${opt('next', 'callback', 'Call back')}${opt('next', 'meeting', 'Book meeting')}${opt('next', 'quote', 'Send quote')}${late ? opt('next', 'negotiation', 'Negotiating') : ''}</div></div>`;
+      if (c.next) {
+        h += `<div class="q"><span>${c.next === 'meeting' ? 'Meeting on' : c.next === 'quote' ? 'Follow up on the quote' : 'Next call'}</span>${chips(c.next === 'quote' ? [[2, 'In 2 days'], [3, 'In 3 days'], [7, '1 week']] : [[1, 'Tomorrow'], [2, 'In 2 days'], [3, 'In 3 days'], [7, '1 week']])}
+          ${c.next !== 'quote' ? `<label class="mini-l">Time (optional)<input type="time" id="c-time" value="${esc(c.time)}"></label>` : ''}</div>`;
+        if (c.next === 'quote' || c.next === 'negotiation') h += `<div class="q"><span>${c.next === 'quote' ? 'Quote amount' : 'Price being discussed'} (₹)</span><input id="c-deal" class="inp" inputmode="numeric" value="${esc(c.deal)}" placeholder="e.g. 25000"></div>`;
+        h += `<p class="tip">Fix the next date and time <b>on the call</b>: “I'll send details on WhatsApp now. Can we talk tomorrow at 11?”</p>`;
+      }
+      h += `<div class="q"><span>Send on WhatsApp</span><div class="seg">${waBtn('details', 'Thanks + details message')}</div></div>`;
+    } else if (o === 'not_now') {
+      h += `<div class="q"><span>Check back on</span>${chips([[30, '1 month'], [60, '2 months'], [90, '3 months']])}<small class="hint">Moves to Nurture and comes back by itself on that date.</small></div>`;
+    } else if (o === 'not_interested') {
+      h += `<p class="tip">Before hanging up, ask: <b>“Is it the budget, or is the timing not right?”</b> If it's timing, choose <b>Not now</b> instead.</p>
+        <div class="q"><span>Why not?</span><div class="seg">${LOST_REASONS.slice(0, 4).map((r) => opt('reason', r, esc(r), 'o-bad')).join('')}</div></div>`;
     }
-    const dated = c.result === 'not_connected' || (c.result === 'connected' && c.interest === 'interested');
-    if (dated) h += `<div class="q"><span>${c.result === 'not_connected' ? '2 · Call back on' : '4 · Next follow-up'}</span><div class="datebar">
-        <button type="button" class="chip" data-day="1">Tomorrow</button><button type="button" class="chip" data-day="3">In 3 days</button><button type="button" class="chip" data-day="7">In 1 week</button>
-        <input type="date" id="c-follow" value="${esc(c.follow)}" aria-label="Follow-up date"></div></div>`;
-    if (c.result) h += `<div class="q"><span>Remark</span><textarea id="c-remark" maxlength="2000" placeholder="${c.result === 'not_connected' ? 'Switched off, busy, no answer…' : c.interest === 'not_interested' ? 'Why not interested?' : 'What did they say? Budget, requirement, next step…'}">${esc(c.remark)}</textarea></div>`;
-    const ready = c.result === 'not_connected' || (c.result === 'connected' && (c.interest === 'not_interested' || (c.interest === 'interested' && c.temp)));
-    h += `<div class="d-actions"><button class="btn primary" type="button" id="cSave" ${ready ? '' : 'disabled'}>Save call</button><span class="err" id="cErr" role="alert"></span></div>
-      <div class="closeopts">Deal finished? <button type="button" class="linkbtn won" data-close-as="Won">Mark won</button><button type="button" class="linkbtn danger" data-close-as="Lost">Mark lost</button></div>`;
-    $('#callSteps').innerHTML = h;
+    if (o) h += `<div class="q"><span>Remark</span><textarea id="c-remark" maxlength="2000" placeholder="${NC.includes(o) ? 'Anything useful, e.g. said call after 6 pm' : o === 'interested' ? 'What did they say? Business, requirement…' : 'What did they say?'}">${esc(c.remark)}</textarea></div>`;
+    const ready = (NC.includes(o)) || o === 'wrong_number' || (o === 'interested' && c.temp && c.next && c.follow) || (o === 'not_now' && c.follow) || (o === 'not_interested' && c.reason);
+    h += `<div class="d-actions"><button class="btn primary" type="button" id="cSave" ${ready ? '' : 'disabled'}>Save call</button><span class="err" id="cErr" role="alert"></span></div>`;
+    // close the deal
+    h += `<div class="closeopts">Deal finished? <button type="button" class="linkbtn won" data-closing="Won">Mark won</button><button type="button" class="linkbtn danger" data-closing="Lost">Mark lost</button></div>`;
+    if (c.closing === 'Won') h += `<div class="closebox"><label class="mini-l">Deal amount (₹) · advance received?<input id="x-deal" class="inp" inputmode="numeric" value="${esc(c.closeDeal)}" placeholder="e.g. 30000"></label>
+        <div class="d-actions"><button class="btn won-btn" type="button" data-confirm-close="Won">Confirm won</button><button class="linkbtn" type="button" data-closing="">Cancel</button></div></div>`;
+    if (c.closing === 'Lost') h += `<div class="closebox"><div class="mini-l">Why was it lost?<div class="seg">${LOST_REASONS.map((r) => opt('closeReason', r, esc(r), 'o-bad')).join('')}</div></div>
+        <div class="d-actions"><button class="btn lost-btn" type="button" data-confirm-close="Lost" ${c.closeReason ? '' : 'disabled'}>Confirm lost</button><button class="linkbtn" type="button" data-closing="">Cancel</button></div></div>`;
+    box.innerHTML = h;
   }
   drawCall();
   const box = $('#callSteps');
-  box.addEventListener('click', async (e) => {
-    const o = e.target.closest('.opt');
-    if (o) { c[o.dataset.f] = o.dataset.v; if (o.dataset.f === 'result' && o.dataset.v === 'not_connected' && !c.follow) c.follow = addDays(1); drawCall(); return; }
-    const dbtn = e.target.closest('[data-day]');
-    if (dbtn) { c.follow = addDays(Number(dbtn.dataset.day)); drawCall(); return; }
-    const cl = e.target.closest('[data-close-as]');
-    if (cl) {
-      if (cl.dataset.confirm !== '1') { cl.dataset.confirm = '1'; cl.textContent = `Tap again to mark ${cl.dataset.closeAs.toLowerCase()}`; return; }
-      try { await api('POST', `/api/leads/${id}/close`, { outcome: cl.dataset.closeAs, remark: c.remark }); toast('Marked ' + cl.dataset.closeAs.toLowerCase()); await loadLeads(); openLead(id); }
-      catch (err) { $('#cErr').textContent = err.message; }
-      return;
-    }
-    if (e.target.closest('#cSave')) {
-      const b = $('#cSave'); b.disabled = true; $('#cErr').textContent = '';
-      try {
-        await api('POST', `/api/leads/${id}/call`, { result: c.result, interest: c.interest, temperature: c.temp, follow_up: c.follow || null, remark: c.remark });
-        toast('Call saved'); await loadLeads(); openLead(id);
-      } catch (err) { $('#cErr').textContent = err.message; b.disabled = false; }
-    }
-  });
-  box.addEventListener('input', (e) => { if (e.target.id === 'c-remark') c.remark = e.target.value; if (e.target.id === 'c-follow') c.follow = e.target.value; });
+  if (box) {
+    box.addEventListener('click', async (e) => {
+      const o = e.target.closest('.opt');
+      if (o) {
+        const f = o.dataset.f, v = o.dataset.v;
+        c[f] = f === 'outcome' || f === 'temp' || f === 'next' || f === 'reason' || f === 'closeReason' ? v : (c[f] === v ? '' : v);
+        if (f === 'outcome') { c.next = ''; c.follow = NC.includes(v) ? defaultNext(v) : ''; c.time = ''; }
+        if (f === 'next' && !c.follow) c.follow = v === 'quote' ? addDays(2) : addDays(1);
+        drawCall(); return;
+      }
+      const dbtn = e.target.closest('[data-day]');
+      if (dbtn) { c.follow = addDays(Number(dbtn.dataset.day)); drawCall(); return; }
+      const wbtn = e.target.closest('[data-wa]');
+      if (wbtn) { api('POST', `/api/leads/${id}/activities`, { type: 'WhatsApp', details: 'Sent ' + (wbtn.dataset.wa === 'details' ? 'thanks + details' : wbtn.dataset.wa === 'busy' ? '“better time?”' : 'intro') + ' message' }).catch(() => {}); return; }
+      const cl = e.target.closest('[data-closing]');
+      if (cl) { c.closing = cl.dataset.closing; drawCall(); return; }
+      const cc = e.target.closest('[data-confirm-close]');
+      if (cc) {
+        cc.disabled = true;
+        try {
+          await api('POST', `/api/leads/${id}/close`, { outcome: cc.dataset.confirmClose, deal_value: c.closeDeal, lost_reason: c.closeReason, remark: c.remark });
+          toast(cc.dataset.confirmClose === 'Won' ? '🎉 Marked won' : 'Marked lost'); await loadLeads(); openLead(id);
+        } catch (err) { $('#cErr').textContent = err.message; cc.disabled = false; }
+        return;
+      }
+      if (e.target.closest('#cSave')) {
+        const b = $('#cSave'); b.disabled = true; $('#cErr').textContent = '';
+        try {
+          const r = await api('POST', `/api/leads/${id}/call`, { outcome: c.outcome, follow_up: c.follow || null, follow_time: c.time, temperature: c.temp,
+            next: c.next, need: c.need, budget: c.budget, decision_maker: c.dm, deal_value: c.deal, lost_reason: c.reason, remark: c.remark });
+          toast(r.auto || 'Call saved', r.auto ? 5000 : 0); await loadLeads(); openLead(id);
+        } catch (err) { $('#cErr').textContent = err.message; b.disabled = false; }
+      }
+    });
+    box.addEventListener('input', (e) => {
+      const map = { 'c-remark': 'remark', 'c-follow': 'follow', 'c-time': 'time', 'c-need': 'need', 'c-deal': 'deal', 'x-deal': 'closeDeal' };
+      if (map[e.target.id]) c[map[e.target.id]] = e.target.value;
+    });
+    box.addEventListener('change', (e) => { if (e.target.id === 'c-follow') drawCall(); });
+  }
 
   $('#dClose').onclick = closeAll;
   $('#dForm').onsubmit = async (e) => {
     e.preventDefault(); const b = $('#dSave'); b.disabled = true; $('#dErr').textContent = '';
     try {
       await api('PATCH', '/api/leads/' + id, { status: $('#d-status').value, priority: $('#d-prio').value, follow_up: $('#d-follow').value || null,
-        assigned_to: $('#d-assigned').value || null, notes: $('#d-notes').value });
+        follow_time: $('#d-time').value, lost_reason: $('#d-reason').value, deal_value: $('#d-deal').value, budget: $('#d-budget').value,
+        decision_maker: $('#d-dm').value, assigned_to: $('#d-assigned').value || null, notes: $('#d-notes').value });
       toast('Saved'); await loadLeads(); openLead(id);
     } catch (err) { $('#dErr').textContent = err.message; b.disabled = false; }
   };
@@ -344,8 +458,10 @@ document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () 
 document.addEventListener('click', (e) => {
   const go = e.target.closest('[data-go]');
   if (go) {
-    const g = go.dataset.go; $('#fStatus').value = ''; $('#fPrio').value = ''; $('#fDue').value = ''; $('#q').value = ''; $('#fAssigned').value = '';
-    if (g === 'hotint') { $('#fStatus').value = 'Interested'; $('#fPrio').value = 'Hot'; } else if (g === 'due') $('#fDue').value = 'due';
+    const g = go.dataset.go;
+    if (g === 'board') { setView('board'); return; }
+    $('#fStatus').value = ''; $('#fPrio').value = ''; $('#fDue').value = ''; $('#q').value = ''; $('#fAssigned').value = '';
+    if (g === 'due' || g === 'stuck') $('#fDue').value = g;
     else $('#fStatus').value = g;
     renderList(); setView('list'); return;
   }

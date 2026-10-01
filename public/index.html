@@ -9,7 +9,7 @@
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap">
-<link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/app.css?v=3">
 </head>
 <body>
 
@@ -72,6 +72,7 @@
       <div class="grid2" style="margin-top:14px">
         <div class="card"><h2>Do today</h2><div class="todo" id="todo"></div></div>
         <div class="card"><h2>Pipeline</h2><div class="bars" id="bars"></div>
+          <h2 style="margin-top:18px">Why we lose leads</h2><div class="bars" id="reasons"></div>
           <h2 style="margin-top:18px">What leads want</h2><div class="bars" id="needs"></div></div>
       </div>
     </section>
@@ -82,7 +83,7 @@
         <select id="fStatus" aria-label="Status"><option value="">All statuses</option></select>
         <select id="fPrio" aria-label="Priority"><option value="">All priorities</option><option>Hot</option><option>Warm</option><option>Cold</option></select>
         <select id="fAssigned" aria-label="Assigned to"><option value="">Anyone</option><option value="none">Unassigned</option></select>
-        <select id="fDue" aria-label="Follow-up"><option value="">Any follow-up</option><option value="due">Due / overdue</option></select>
+        <select id="fDue" aria-label="Follow-up"><option value="">Any follow-up</option><option value="due">Due / overdue</option><option value="stuck">Stuck &gt; 7 days</option></select>
         <span class="count" id="count"></span>
       </div>
       <div class="table-wrap" style="margin-top:10px">
@@ -165,6 +166,6 @@
 </form>
 
 <div class="toast" id="toast" hidden role="status"></div>
-<script src="/app.js"></script>
+<script src="/app.js?v=3"></script>
 </body>
 </html>

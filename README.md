@@ -7,11 +7,16 @@ Instagram ad → Meta Instant Form → Google Sheet (already working) → CRM (e
 ```
 
 **What the team can do**
-- **Dashboard:** new leads today, hot leads waiting, follow-ups due, win rate, and a "Do today" list.
-- **Leads:** search and filter by status, priority, person, or due follow-ups.
-- **Log a call:** every lead starts as **Fresh**. After each call, tap Connected or Not connected. If connected, choose Interested or Not interested, then Hot, Warm or Cold, set the next follow-up date and write a remark.
-- **Stage track:** each lead shows where it stands (Fresh → Connected / Not connected ×2 → Interested → Hot → Follow-up 3 Oct → Won / Lost) and its last remark.
-- **Pipeline:** a board with a column for each stage: Fresh, Not connected, Interested, Not interested, Won, Lost.
+- **Dashboard ("Do today"):** 🔴 new leads to call now (Hot first, with a "waiting 2 h" timer), ⏰ overdue follow-ups, 📅 today's follow-ups and meetings. Tiles for meetings today, leads stuck more than 7 days, pipeline value in ₹, deals won this month and win rate. Charts show the funnel, why leads are lost, and what leads want.
+- **Stages (where the deal is):** New → Trying to reach → Qualifying → Meeting booked → Quote sent → Negotiation → **Won** (advance received). **Nurture** is for "not now", and **Lost** always has a reason.
+- **Log a call, 2–3 taps.** Didn't talk: *No answer* (next try later today), *Switched off* (tomorrow), *Cut / Busy* (in 2 days) or *Wrong number* (Lost). Talked: *Interested* (Hot/Warm/Cold, the 4 qualifying questions: need, budget, timeline and decision maker, then the next step: call back, book meeting, send quote with ₹, or negotiating), *Not now* (Nurture with a check-back date) or *Not interested* (reason). Each call result offers a one-tap WhatsApp message.
+- **Automatic rules:**
+  - 5 tries with no answer → Lost (Unreachable). The lead comes back once after 30 days for a final try.
+  - 3 cut calls → Lost (Not responding).
+  - A missed call never moves a deal backwards.
+  - Whoever calls a lead first is assigned to it.
+  - Won needs a ₹ amount, and Lost needs a reason.
+- **Pipeline:** a board with a column for each stage, showing the ₹ total, try count, next date and a red "Stuck" tag.
 - **Lead page:** one-tap WhatsApp and Call buttons, plus status, follow-up date, assigned person and notes. There is also a full history of who did what and when.
 - **Team (admins only):** add people, reset passwords, and deactivate people who leave.
 - **Admins** can download all leads as CSV and delete leads.

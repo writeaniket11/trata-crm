@@ -101,8 +101,35 @@ if (!db.prepare("SELECT 1 FROM settings WHERE key = 'stage_flow_v2'").get()) {
     db.prepare("INSERT INTO settings (key, value) VALUES ('stage_flow_v2', ?)").run(new Date().toISOString());
   })();
 }
-// Leads written with the old default (e.g. by an older import) are always Fresh.
-db.exec("UPDATE leads SET status = 'Fresh' WHERE status = 'New'");
+// ---------- v3: sales pipeline stages ----------
+// Stage = where the deal is; call results are logged on the lead, not used as stages.
+addCol('stage_at', 'TEXT');                               // when the lead entered its current stage
+addCol('cut_count', 'INTEGER NOT NULL DEFAULT 0');       // times they cut the call / were busy
+addCol('lost_reason', "TEXT NOT NULL DEFAULT ''");
+addCol('deal_value', 'INTEGER');                          // ₹, set at quote / won
+addCol('budget', "TEXT NOT NULL DEFAULT ''");
+addCol('decision_maker', "TEXT NOT NULL DEFAULT ''");    // 'yes' | 'no' | ''
+addCol('follow_time', "TEXT NOT NULL DEFAULT ''");       // 'HH:MM', e.g. a meeting time
+addCol('last_outcome', "TEXT NOT NULL DEFAULT ''");      // last call button pressed
+
+if (!db.prepare("SELECT 1 FROM settings WHERE key = 'stage_flow_v3'").get()) {
+  db.transaction(() => {
+    db.exec(`
+      UPDATE leads SET status = 'New' WHERE status = 'Fresh';
+      UPDATE leads SET status = 'Trying to reach' WHERE status = 'Not connected';
+      UPDATE leads SET status = 'Qualifying' WHERE status = 'Interested';
+      UPDATE leads SET status = 'Lost', lost_reason = 'Not interested', follow_up = NULL WHERE status = 'Not interested';
+      UPDATE leads SET stage_at = updated_at WHERE stage_at IS NULL;
+      -- Every open lead needs a next date: undated ones show up in today's list to be sorted into the right stage.
+      UPDATE leads SET follow_up = date('now', '+330 minutes')
+        WHERE follow_up IS NULL AND status IN ('Trying to reach', 'Qualifying');
+    `);
+    db.prepare("INSERT INTO settings (key, value) VALUES ('stage_flow_v3', ?)").run(new Date().toISOString());
+  })();
+}
+// Leads written with an older default (e.g. by an older import) are always New.
+db.exec("UPDATE leads SET status = 'New' WHERE status = 'Fresh'");
+db.exec('UPDATE leads SET stage_at = created_at WHERE stage_at IS NULL');
 
 const getSetting = (k) => { const r = db.prepare('SELECT value FROM settings WHERE key = ?').get(k); return r ? r.value : ''; };
 const setSetting = (k, v) => db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(k, String(v ?? ''));
